@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 from collections.abc import Callable
@@ -34,21 +35,25 @@ def run_command(
     stdout_path: Path,
     stderr_path: Path,
     on_start: Callable[[int], None] | None = None,
+    env: dict[str, str] | None = None,
+    after_start: Callable[[], None] | None = None,
 ) -> RunResult:
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
 
     with stdout_path.open("ab") as stdout_file, stderr_path.open("ab") as stderr_file:
         process = subprocess.Popen(
-            command,
+            ["bash", command],
             cwd=cwd,
-            shell=True,
             stdout=stdout_file,
             stderr=stderr_file,
             start_new_session=True,
+            env=env or os.environ.copy(),
         )
         if on_start is not None:
             on_start(process.pid)
+        if after_start is not None:
+            after_start()
         exit_code = process.wait()
 
     exit_status, killed = classify_exit_code(exit_code)

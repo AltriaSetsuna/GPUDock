@@ -13,11 +13,12 @@ import uvicorn
 from cmddock.api import build_app
 from cmddock.config import build_settings
 from cmddock.database import Database
+from cmddock.gpu import parse_gpu_count, parse_submission_command
 from cmddock.models import CommandStatus, QueueMode
 from cmddock.worker import CommandWorker, ParallelDispatcher
 
 app = typer.Typer(
-    help="CmdDock: a local command queue daemon with serial and parallel execution modes.",
+    help="GPUDock: a local GPU script scheduler with serial and parallel execution modes.",
     no_args_is_help=True,
 )
 
@@ -28,24 +29,39 @@ def serve(
     port: Annotated[int, typer.Option(help="Bind port.")] = 8765,
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Start the HTTP API and background worker."""
+    """Start the HTTP API and GPU schedulers."""
     settings = build_settings(data_dir=data_dir, host=host, port=port)
     uvicorn.run(build_app(settings), host=settings.host, port=settings.port)
 
 
 @app.command()
 def add(
-    command: Annotated[str, typer.Argument(help="Shell command to enqueue.")],
+    command: Annotated[
+        str,
+        typer.Argument(
+            help="Absolute .sh path, optionally prefixed with env assignments and bash.",
+        ),
+    ],
     cwd: Annotated[Path | None, typer.Option(help="Working directory for the command.")] = None,
     queue: Annotated[QueueMode, typer.Option(help="Execution queue: serial or parallel.")] = (
         QueueMode.SERIAL
     ),
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Add a command directly to the local SQLite queue."""
+    """Add a validated GPU script command to the local SQLite queue."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
-    record = database.create_command(command, str(cwd) if cwd is not None else None, queue)
+    try:
+        parsed = parse_submission_command(command)
+        gpu_count = parse_gpu_count(command)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="command") from exc
+    record = database.create_command(
+        parsed.command,
+        str(cwd) if cwd is not None else None,
+        queue,
+        gpu_count,
+    )
     typer.echo(_to_json(record))
 
 
@@ -53,7 +69,7 @@ def add(
 def worker(
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Run serial and parallel queue processors for the local queue."""
+    """Run serial and parallel GPU schedulers for the local queue."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
     command_worker = CommandWorker(database, settings.logs_dir, settings.poll_interval_seconds)

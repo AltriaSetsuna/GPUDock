@@ -1,71 +1,142 @@
-# CmdDock
+# GPUDock
 
-CmdDock is a local command queue daemon. It accepts commands, records their lifecycle, and executes them through either a serial queue or a parallel queue.
+GPUDock is a local GPU script scheduler. It accepts absolute `.sh` bash script paths, optionally prefixed with environment variable assignments and `bash`, waits until enough GPUs have stayed below 1% memory usage for 120 seconds, injects `CUDA_DEVICES` and `GPU_COUNT`, and then launches the script.
 
-It is designed for single-machine use: simple enough to run locally, but structured like a maintainable open source project.
+It is designed for a shared single-machine GPU server: simple enough to run locally, but strict about what it executes.
 
 ## Features
 
-- Submit shell commands through an HTTP API or CLI.
-- Execute `serial` commands one at a time with a single background worker.
-- Execute `parallel` commands immediately by dispatching all pending parallel work.
-- Persist queue state in SQLite.
-- Record submission time, finish time, and exit status for every command.
-- Requeue killed commands immediately so the killed command runs again next.
-- Move commands that exit by themselves with a non-zero status into an error queue.
-- Show all query results in reverse chronological order, with newest records first.
-- Store stdout and stderr logs per command.
-- Terminate a running command and let the worker requeue it automatically.
+- Accept only absolute `.sh` bash script paths, with optional `KEY=value` prefixes.
+- Read `GPU_COUNT` from the submitted script.
+- Use only GPUs whose memory usage stays below 1% for 120 seconds.
+- Override the launched script environment with `CUDA_DEVICES=<ids>` and `GPU_COUNT=<n>`.
+- Execute `serial` tasks one at a time.
+- Execute `parallel` tasks by dispatching all pending parallel work.
+- Requeue tasks when not enough idle GPUs are available.
+- Requeue killed tasks, while self-failed tasks move to `error`.
+- Send an email after a script process is successfully started.
+- Store task metadata and logs in SQLite.
 
 ## Quick Start
 
 ```bash
-cd /home/yijiali/tools/CmdDock
+git clone https://github.com/your-name/gpudock.git
+cd gpudock
+python -m venv .venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
-cmddock serve
+gpudock serve
 ```
 
-In another terminal:
+Then open the visual dashboard:
+
+```text
+http://127.0.0.1:8765/
+```
+
+Example script:
 
 ```bash
-cmddock add "echo hello"
-cmddock add "python download.py" --queue parallel
-cmddock queue
-cmddock errors
-cmddock logs 1
-cmddock kill 1
+#!/usr/bin/env bash
+export GPU_COUNT=2
+python train.py
 ```
 
-By default, CmdDock listens on `127.0.0.1:8765` and stores state under `.cmddock/`.
+Submit it from the dashboard by entering either the script's absolute path or a
+restricted bash launch command:
+
+```bash
+DATA_PATH=/home/data.json bash /absolute/path/to/train.sh
+```
+
+Then choose `serial` or `parallel`.
+
+The CLI remains available for automation:
+
+```bash
+gpudock add /absolute/path/to/train.sh
+gpudock add 'DATA_PATH=/home/data.json bash /absolute/path/to/train.sh'
+gpudock add /absolute/path/to/eval.sh --queue parallel
+gpudock queue
+gpudock logs 1
+gpudock kill 1
+```
+
+The legacy `cmddock` entry point is still installed as an alias, but `gpudock` is the preferred command.
+
+## Visual Dashboard
+
+`gpudock serve` starts both the HTTP API and a local browser dashboard at `/`.
+The dashboard lets you:
+
+- submit absolute `.sh` script paths or env-prefixed bash launch commands;
+- choose `serial` or `parallel` scheduling;
+- filter tasks by queue and status;
+- inspect assigned GPUs and submission time;
+- view stdout/stderr logs;
+- retry, cancel, or kill tasks when the task state allows it.
+
+The same dashboard is also available at:
+
+```text
+http://127.0.0.1:8765/ui
+```
+
+## Scheduling
+
+GPUDock polls GPU memory with:
+
+```bash
+nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits
+```
+
+A GPU is eligible only when it has stayed below the threshold for 120 continuous seconds:
+
+```text
+memory.used / memory.total < 0.01
+```
+
+When a pending task is claimed:
+
+1. GPUDock validates that `command` is either an absolute `.sh` path or optional
+   `KEY=value` assignments followed by `bash /absolute/path/to/script.sh`.
+2. GPUDock parses the script's last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment.
+3. GPUDock checks for at least `n` GPUs that stayed below 1% memory usage for 120 seconds.
+4. If enough GPUs are available, it launches the script with `bash`.
+5. It injects `CUDA_DEVICES` and overrides `GPU_COUNT`.
+6. It sends a startup email after the process starts.
+7. If GPUs are insufficient, the task returns to `pending`.
 
 ## HTTP API
 
-### Submit a command
+### Submit a script
 
 ```bash
 curl -X POST http://127.0.0.1:8765/commands \
   -H 'content-type: application/json' \
-  -d '{"command": "echo hello", "queue": "serial"}'
+  -d '{"command": "/absolute/path/to/train.sh", "queue": "serial"}'
 ```
 
-Parallel commands use the same endpoint:
+With environment variables:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/commands \
   -H 'content-type: application/json' \
-  -d '{"command": "python download.py", "queue": "parallel"}'
+  -d '{"command": "DATA_PATH=/home/data.json bash /absolute/path/to/train.sh", "queue": "serial"}'
 ```
 
-### Query queue state
+Parallel tasks use the same endpoint:
+
+```bash
+curl -X POST http://127.0.0.1:8765/commands \
+  -H 'content-type: application/json' \
+  -d '{"command": "/absolute/path/to/eval.sh", "queue": "parallel"}'
+```
+
+### Query state
 
 ```bash
 curl http://127.0.0.1:8765/queue
-```
-
-### Query command history
-
-```bash
 curl http://127.0.0.1:8765/commands
 curl 'http://127.0.0.1:8765/commands?queue=parallel'
 curl 'http://127.0.0.1:8765/commands?status=error'
@@ -73,67 +144,81 @@ curl 'http://127.0.0.1:8765/commands?status=error'
 
 All query endpoints return newest records first.
 
-### Control commands
+### Control tasks
 
 ```http
 POST /commands/{id}/cancel
 POST /commands/{id}/retry
 POST /commands/{id}/kill
+GET  /commands/{id}/logs
 ```
 
-## Command Lifecycle
+## Email
+
+Startup email behavior follows `/home/yijiali/python.py`.
+
+Defaults:
+
+```text
+receiver: 1744141921@qq.com
+sender:   1744141921@qq.com
+server:   smtp.qq.com
+port:     465
+```
+
+You can override them with environment variables:
+
+```bash
+export GPUDOCK_EMAIL_RECEIVER="you@example.com"
+export GPUDOCK_EMAIL_SENDER="sender@example.com"
+export GPUDOCK_EMAIL_PASSWORD="smtp-auth-code"
+export GPUDOCK_SMTP_SERVER="smtp.qq.com"
+export GPUDOCK_SMTP_PORT="465"
+```
+
+If receiver, sender, or password is missing, email is skipped.
+
+## Lifecycle
 
 ```text
 pending -> running -> succeeded
 pending -> running -> error
 pending -> canceled
 running -> killed -> pending
+running -> waiting_for_gpu -> pending
 ```
 
 Important behavior:
 
-- A command with exit code `0` becomes `succeeded`.
-- A command that exits by itself with a non-zero exit code becomes `error`.
-- A killed serial command becomes `pending` again and is scheduled before other serial commands.
-- A killed parallel command becomes `pending` again and is dispatched again by the parallel dispatcher.
-- A pending command can be canceled.
-- A running command can be killed with `cmddock kill <id>` or `POST /commands/{id}/kill`.
+- Exit code `0` becomes `succeeded`.
+- Non-zero self exit becomes `error`.
+- Killed tasks return to `pending`.
+- Insufficient stable-idle GPUs return to `pending` with `exit_status = waiting_for_gpu`.
+- Pending tasks can be canceled.
+- Running tasks can be killed with `gpudock kill <id>`.
 
 ## Queue Modes
 
-CmdDock stores all commands in one table and uses the `queue` field to choose the execution strategy.
-
 | Queue | Behavior |
 | --- | --- |
-| `serial` | Claims one pending command at a time, preserving oldest-first execution order. |
-| `parallel` | Claims all pending parallel commands and starts them immediately. |
+| `serial` | Claims one pending task at a time. |
+| `parallel` | Claims all pending parallel tasks and starts one runner thread per task. |
 
-The default queue is `serial`, so existing usage remains conservative.
-
-## Project Layout
-
-```text
-src/cmddock/
-├── api.py        # FastAPI routes and app factory
-├── cli.py        # Typer command-line interface
-├── config.py     # Runtime settings
-├── database.py   # SQLite schema and queries
-├── models.py     # Pydantic response/request models
-├── runner.py     # subprocess execution logic
-└── worker.py     # serial worker and parallel dispatcher
-```
+The default queue is `serial`.
 
 ## Development
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 uv pip install -e ".[dev]"
 pytest
-ruff check .
+ruff check --no-cache .
 ```
 
 ## Version
 
-Current version: `0.2.0`
+Current version: `0.3.0`
 
 ## License
 

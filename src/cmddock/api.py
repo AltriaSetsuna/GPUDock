@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
 from cmddock.config import Settings
 from cmddock.database import Database
+from cmddock.gpu import parse_gpu_count, parse_submission_command
 from cmddock.models import (
     CommandCreate,
     CommandList,
@@ -19,6 +21,7 @@ from cmddock.models import (
     QueueMode,
     QueueSnapshot,
 )
+from cmddock.web import render_index
 from cmddock.worker import CommandWorker, ParallelDispatcher
 
 
@@ -63,24 +66,45 @@ def build_app(settings: Settings) -> FastAPI:
             state.stop_workers()
 
     app = FastAPI(
-        title="CmdDock",
-        version="0.2.0",
-        summary="Local command queue daemon with serial and parallel execution modes",
+        title="GPUDock",
+        version="0.3.0",
+        summary="Local GPU script scheduler for idle GPUs",
         lifespan=lifespan,
     )
 
     def get_state() -> AppState:
         return state
 
-    StateDependency = Annotated[AppState, Depends(get_state)]
+    state_dependency = Depends(get_state)
 
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def index() -> HTMLResponse:
+        return HTMLResponse(render_index())
+
+    @app.get("/ui", response_class=HTMLResponse, include_in_schema=False)
+    def ui() -> HTMLResponse:
+        return HTMLResponse(render_index())
+
     @app.post("/commands", response_model=CommandRecord, status_code=201)
-    def create_command(payload: CommandCreate, app_state: StateDependency) -> dict:
-        record = app_state.database.create_command(payload.command, payload.cwd, payload.queue)
+    def create_command(
+        payload: CommandCreate,
+        app_state: AppState = state_dependency,
+    ) -> dict:
+        try:
+            parsed = parse_submission_command(payload.command)
+            gpu_count = parse_gpu_count(payload.command)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        record = app_state.database.create_command(
+            parsed.command,
+            payload.cwd,
+            payload.queue,
+            gpu_count,
+        )
         app_state.wake_workers()
         return record
 
@@ -88,20 +112,25 @@ def build_app(settings: Settings) -> FastAPI:
     def list_commands(
         status: Annotated[CommandStatus | None, Query()] = None,
         queue: Annotated[QueueMode | None, Query()] = None,
-        app_state: StateDependency = None,
+        app_state: AppState = state_dependency,
     ) -> dict[str, list[dict]]:
-        assert app_state is not None
         return {"commands": app_state.database.list_commands(status=status, queue=queue)}
 
     @app.get("/commands/{command_id}", response_model=CommandRecord)
-    def get_command(command_id: int, app_state: StateDependency) -> dict:
+    def get_command(
+        command_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict:
         try:
             return app_state.database.get_command(command_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/commands/{command_id}/cancel", response_model=CommandRecord)
-    def cancel_command(command_id: int, app_state: StateDependency) -> dict:
+    def cancel_command(
+        command_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict:
         try:
             return app_state.database.cancel_pending_command(command_id)
         except KeyError as exc:
@@ -110,7 +139,10 @@ def build_app(settings: Settings) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/commands/{command_id}/retry", response_model=CommandRecord)
-    def retry_command(command_id: int, app_state: StateDependency) -> dict:
+    def retry_command(
+        command_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict:
         try:
             record = app_state.database.retry_error_command(command_id)
         except KeyError as exc:
@@ -121,7 +153,10 @@ def build_app(settings: Settings) -> FastAPI:
         return record
 
     @app.post("/commands/{command_id}/kill", response_model=CommandRecord)
-    def kill_command(command_id: int, app_state: StateDependency) -> dict:
+    def kill_command(
+        command_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict:
         try:
             record = app_state.database.get_kill_target(command_id)
             os.killpg(record["pid"], signal.SIGTERM)
@@ -139,7 +174,10 @@ def build_app(settings: Settings) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/commands/{command_id}/logs", response_model=CommandLogs)
-    def get_logs(command_id: int, app_state: StateDependency) -> dict[str, str | int]:
+    def get_logs(
+        command_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict[str, str | int]:
         try:
             record = app_state.database.get_command(command_id)
         except KeyError as exc:
@@ -150,7 +188,7 @@ def build_app(settings: Settings) -> FastAPI:
         return {"id": command_id, "stdout": stdout, "stderr": stderr}
 
     @app.get("/queue", response_model=QueueSnapshot)
-    def queue(app_state: StateDependency) -> dict[str, list[dict]]:
+    def queue(app_state: AppState = state_dependency) -> dict[str, list[dict]]:
         return app_state.database.queue_snapshot()
 
     return app

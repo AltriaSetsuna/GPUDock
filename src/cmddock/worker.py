@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 
 from cmddock.database import Database
+from cmddock.emailer import send_launch_email_async
+from cmddock.gpu import (
+    GPUSchedulingError,
+    parse_gpu_count,
+    parse_submission_command,
+    select_idle_gpus,
+)
 from cmddock.models import QueueMode
 from cmddock.runner import run_command
 
@@ -16,24 +24,53 @@ class CommandRunner:
         self.database = database
         self.logs_dir = logs_dir
 
-    def run_one(self, command: dict) -> None:
+    def run_one(self, command: dict) -> bool:
         command_id = command["id"]
+        command_text = command["command"]
         stdout_path = self.logs_dir / f"{command_id}.stdout.log"
         stderr_path = self.logs_dir / f"{command_id}.stderr.log"
         self.database.set_log_paths(command_id, stdout_path, stderr_path)
 
         try:
+            parsed = parse_submission_command(command_text)
+            script_path = str(parsed.script_path)
+            gpu_count = parse_gpu_count(command_text)
+            self.database.set_gpu_requirement(command_id, gpu_count)
+            selected_gpus, idle_gpus = select_idle_gpus(gpu_count)
+        except GPUSchedulingError as exc:
+            self.database.requeue_waiting_for_gpu(command_id, str(exc))
+            return False
+        except Exception as exc:  # noqa: BLE001 - invalid script belongs in error queue.
+            logger.exception("Command %s failed validation before launch", command_id)
+            self.database.mark_error(command_id, None, "validation_error", str(exc))
+            return True
+
+        cuda_devices = ",".join(str(gpu_id) for gpu_id in selected_gpus)
+        env = os.environ.copy()
+        env.update(parsed.env_overrides)
+        env["CUDA_DEVICES"] = cuda_devices
+        env["GPU_COUNT"] = str(gpu_count)
+        self.database.set_assigned_gpu_ids(command_id, cuda_devices)
+
+        try:
             result = run_command(
-                command["command"],
+                script_path,
                 command["cwd"],
                 stdout_path,
                 stderr_path,
                 on_start=lambda pid: self.database.set_running_pid(command_id, pid),
+                env=env,
+                after_start=lambda: send_launch_email_async(
+                    script_path=script_path,
+                    selected_gpus=selected_gpus,
+                    idle_gpus=idle_gpus,
+                    command_id=command_id,
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - unexpected runner failure belongs in error queue.
             logger.exception("Command %s failed before subprocess completion", command_id)
             self.database.mark_error(command_id, None, "runner_exception", str(exc))
-            return
+            return True
 
         if result.exit_code == 0:
             self.database.mark_succeeded(command_id, result.exit_code)
@@ -46,6 +83,7 @@ class CommandRunner:
                 result.exit_status,
                 result.error_message,
             )
+        return True
 
 
 class CommandWorker:
@@ -89,7 +127,10 @@ class CommandWorker:
                 with self._condition:
                     self._condition.wait(timeout=self.poll_interval_seconds)
                 continue
-            self.runner.run_one(command)
+            launched = self.runner.run_one(command)
+            if not launched:
+                with self._condition:
+                    self._condition.wait(timeout=self.poll_interval_seconds)
 
 
 class ParallelDispatcher:
@@ -163,4 +204,3 @@ class ParallelDispatcher:
             current_thread = threading.current_thread()
             with self._running_lock:
                 self._running_threads.discard(current_thread)
-            self.wake()

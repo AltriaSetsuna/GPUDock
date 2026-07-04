@@ -1,5 +1,5 @@
-"""CmdDock: a local serial command queue daemon."""
+"""GPUDock: a local GPU script scheduler."""
 
 __all__ = ["__version__"]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

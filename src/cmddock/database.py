@@ -49,6 +49,8 @@ class Database:
                     exit_code INTEGER,
                     exit_status TEXT,
                     pid INTEGER,
+                    gpu_count INTEGER,
+                    assigned_gpu_ids TEXT,
                     stdout_path TEXT,
                     stderr_path TEXT,
                     error_message TEXT,
@@ -58,6 +60,8 @@ class Database:
             )
             self._ensure_column(conn, "commands", "queue", "TEXT NOT NULL DEFAULT 'serial'")
             self._ensure_column(conn, "commands", "pid", "INTEGER")
+            self._ensure_column(conn, "commands", "gpu_count", "INTEGER")
+            self._ensure_column(conn, "commands", "assigned_gpu_ids", "TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_commands_status_submitted "
                 "ON commands(status, submitted_at DESC, id DESC)"
@@ -92,7 +96,8 @@ class Database:
                     exit_code = NULL,
                     exit_status = 'requeued_after_restart',
                     pid = NULL,
-                    error_message = 'CmdDock restarted while command was running.',
+                    assigned_gpu_ids = NULL,
+                    error_message = 'GPUDock restarted while command was running.',
                     run_after_id = NULL
                 WHERE status = ?
                 {queue_filter}
@@ -106,17 +111,18 @@ class Database:
         command: str,
         cwd: str | None,
         queue: QueueMode = QueueMode.SERIAL,
+        gpu_count: int | None = None,
     ) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
             submitted_at = utc_now()
             cur = conn.execute(
                 """
                 INSERT INTO commands (
-                    command, cwd, queue, status, submitted_at, run_after_id
+                    command, cwd, queue, status, submitted_at, gpu_count, run_after_id
                 )
-                VALUES (?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, NULL)
                 """,
-                (command, cwd, queue, CommandStatus.PENDING, submitted_at),
+                (command, cwd, queue, CommandStatus.PENDING, submitted_at, gpu_count),
             )
             return self.get_command(cur.lastrowid, conn=conn)
 
@@ -222,6 +228,7 @@ class Database:
                     exit_code = NULL,
                     exit_status = NULL,
                     pid = NULL,
+                    assigned_gpu_ids = NULL,
                     error_message = NULL,
                     run_after_id = NULL
                 WHERE id = ?
@@ -259,6 +266,7 @@ class Database:
                     exit_code = NULL,
                     exit_status = NULL,
                     pid = NULL,
+                    assigned_gpu_ids = NULL,
                     error_message = NULL,
                     run_after_id = NULL
                 WHERE id = ? AND status = ?
@@ -289,6 +297,7 @@ class Database:
                     exit_code = ?,
                     exit_status = ?,
                     pid = NULL,
+                    assigned_gpu_ids = NULL,
                     error_message = 'Killed by signal; requeued for immediate retry.',
                     run_after_id = ?
                 WHERE id = ?
@@ -304,6 +313,26 @@ class Database:
             )
             return self.get_command(command_id, conn=conn)
 
+    def requeue_waiting_for_gpu(self, command_id: int, reason: str) -> dict[str, Any]:
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE commands
+                SET status = ?,
+                    started_at = NULL,
+                    finished_at = NULL,
+                    exit_code = NULL,
+                    exit_status = 'waiting_for_gpu',
+                    pid = NULL,
+                    assigned_gpu_ids = NULL,
+                    error_message = ?,
+                    run_after_id = NULL
+                WHERE id = ?
+                """,
+                (CommandStatus.PENDING, reason, command_id),
+            )
+            return self.get_command(command_id, conn=conn)
+
     def set_log_paths(self, command_id: int, stdout_path: Path, stderr_path: Path) -> None:
         with self._lock, self.connect() as conn:
             conn.execute(
@@ -316,6 +345,20 @@ class Database:
             conn.execute(
                 "UPDATE commands SET pid = ? WHERE id = ? AND status = ?",
                 (pid, command_id, CommandStatus.RUNNING),
+            )
+
+    def set_gpu_requirement(self, command_id: int, gpu_count: int) -> None:
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                "UPDATE commands SET gpu_count = ? WHERE id = ?",
+                (gpu_count, command_id),
+            )
+
+    def set_assigned_gpu_ids(self, command_id: int, assigned_gpu_ids: str) -> None:
+        with self._lock, self.connect() as conn:
+            conn.execute(
+                "UPDATE commands SET assigned_gpu_ids = ? WHERE id = ? AND status = ?",
+                (assigned_gpu_ids, command_id, CommandStatus.RUNNING),
             )
 
     def get_kill_target(self, command_id: int) -> dict[str, Any]:
@@ -344,6 +387,7 @@ class Database:
                     exit_code = ?,
                     exit_status = ?,
                     pid = NULL,
+                    assigned_gpu_ids = NULL,
                     error_message = ?,
                     run_after_id = NULL
                 WHERE id = ?

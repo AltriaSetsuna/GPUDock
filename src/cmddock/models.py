@@ -37,6 +37,8 @@ class CommandRecord(BaseModel):
     exit_code: int | None
     exit_status: str | None
     pid: int | None
+    gpu_count: int | None
+    assigned_gpu_ids: str | None
     stdout_path: str | None
     stderr_path: str | None
     error_message: str | None

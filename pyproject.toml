@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cmddock"
-version = "0.2.0"
-description = "A local command queue daemon with serial and parallel execution modes."
+name = "gpudock"
+version = "0.3.0"
+description = "A local GPU script scheduler that launches bash scripts on idle GPUs."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
   { name = "Yijia Li" }
 ]
-keywords = ["command-queue", "daemon", "sqlite", "fastapi", "local-tools"]
+keywords = ["gpu", "scheduler", "command-queue", "daemon", "sqlite", "fastapi"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -39,6 +39,7 @@ dev = [
 ]
 
 [project.scripts]
+gpudock = "cmddock.cli:app"
 cmddock = "cmddock.cli:app"
 
 [tool.hatch.build.targets.wheel]
