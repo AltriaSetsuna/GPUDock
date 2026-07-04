@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cmddock.models import CommandStatus
+from cmddock.models import CommandStatus, QueueMode
 
 
 def utc_now() -> str:
@@ -41,6 +41,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     command TEXT NOT NULL,
                     cwd TEXT,
+                    queue TEXT NOT NULL DEFAULT 'serial',
                     status TEXT NOT NULL,
                     submitted_at TEXT NOT NULL,
                     started_at TEXT,
@@ -55,20 +56,35 @@ class Database:
                 )
                 """
             )
+            self._ensure_column(conn, "commands", "queue", "TEXT NOT NULL DEFAULT 'serial'")
             self._ensure_column(conn, "commands", "pid", "INTEGER")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_commands_status_submitted "
                 "ON commands(status, submitted_at DESC, id DESC)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_commands_queue_status "
+                "ON commands(queue, status, submitted_at DESC, id DESC)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_commands_run_after "
                 "ON commands(run_after_id)"
             )
 
-    def recover_interrupted_running_commands(self) -> int:
+    def recover_interrupted_running_commands(self, queue: QueueMode | None = None) -> int:
         with self._lock, self.connect() as conn:
+            queue_filter = "" if queue is None else "AND queue = ?"
+            params: (
+                tuple[CommandStatus, CommandStatus]
+                | tuple[CommandStatus, CommandStatus, QueueMode]
+            )
+            params = (
+                (CommandStatus.PENDING, CommandStatus.RUNNING)
+                if queue is None
+                else (CommandStatus.PENDING, CommandStatus.RUNNING, queue)
+            )
             cur = conn.execute(
-                """
+                f"""
                 UPDATE commands
                 SET status = ?,
                     started_at = NULL,
@@ -79,22 +95,28 @@ class Database:
                     error_message = 'CmdDock restarted while command was running.',
                     run_after_id = NULL
                 WHERE status = ?
+                {queue_filter}
                 """,
-                (CommandStatus.PENDING, CommandStatus.RUNNING),
+                params,
             )
             return cur.rowcount
 
-    def create_command(self, command: str, cwd: str | None) -> dict[str, Any]:
+    def create_command(
+        self,
+        command: str,
+        cwd: str | None,
+        queue: QueueMode = QueueMode.SERIAL,
+    ) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
             submitted_at = utc_now()
             cur = conn.execute(
                 """
                 INSERT INTO commands (
-                    command, cwd, status, submitted_at, run_after_id
+                    command, cwd, queue, status, submitted_at, run_after_id
                 )
-                VALUES (?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, NULL)
                 """,
-                (command, cwd, CommandStatus.PENDING, submitted_at),
+                (command, cwd, queue, CommandStatus.PENDING, submitted_at),
             )
             return self.get_command(cur.lastrowid, conn=conn)
 
@@ -117,13 +139,27 @@ class Database:
             if owns_connection:
                 connection_context.__exit__(None, None, None)
 
-    def list_commands(self, status: CommandStatus | None = None) -> list[dict[str, Any]]:
+    def list_commands(
+        self,
+        status: CommandStatus | None = None,
+        queue: QueueMode | None = None,
+    ) -> list[dict[str, Any]]:
         with self._lock, self.connect() as conn:
-            if status is None:
+            if status is None and queue is None:
                 rows = conn.execute(
                     "SELECT * FROM commands ORDER BY submitted_at DESC, id DESC"
                 ).fetchall()
-            else:
+            elif status is None:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM commands
+                    WHERE queue = ?
+                    ORDER BY submitted_at DESC, id DESC
+                    """,
+                    (queue,),
+                ).fetchall()
+            elif queue is None:
                 rows = conn.execute(
                     """
                     SELECT *
@@ -133,6 +169,16 @@ class Database:
                     """,
                     (status,),
                 ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM commands
+                    WHERE status = ? AND queue = ?
+                    ORDER BY submitted_at DESC, id DESC
+                    """,
+                    (status, queue),
+                ).fetchall()
             return [dict(row) for row in rows]
 
     def queue_snapshot(self) -> dict[str, list[dict[str, Any]]]:
@@ -140,6 +186,8 @@ class Database:
             "running": self.list_commands(CommandStatus.RUNNING),
             "pending": self.list_commands(CommandStatus.PENDING),
             "errors": self.list_commands(CommandStatus.ERROR),
+            "serial": self.list_commands(queue=QueueMode.SERIAL),
+            "parallel": self.list_commands(queue=QueueMode.PARALLEL),
         }
 
     def cancel_pending_command(self, command_id: int) -> dict[str, Any]:
@@ -182,13 +230,13 @@ class Database:
             )
             return self.get_command(command_id, conn=conn)
 
-    def claim_next_pending_command(self) -> dict[str, Any] | None:
+    def claim_next_pending_command(self, queue: QueueMode) -> dict[str, Any] | None:
         with self._lock, self.connect() as conn:
             row = conn.execute(
                 """
                 SELECT *
                 FROM commands
-                WHERE status = ?
+                WHERE status = ? AND queue = ?
                 ORDER BY
                     CASE WHEN run_after_id IS NULL THEN 1 ELSE 0 END ASC,
                     run_after_id ASC,
@@ -196,7 +244,7 @@ class Database:
                     id ASC
                 LIMIT 1
                 """,
-                (CommandStatus.PENDING,),
+                (CommandStatus.PENDING, queue),
             ).fetchone()
             if row is None:
                 return None

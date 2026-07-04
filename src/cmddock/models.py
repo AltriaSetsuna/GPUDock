@@ -14,15 +14,22 @@ class CommandStatus(StrEnum):
     CANCELED = "canceled"
 
 
+class QueueMode(StrEnum):
+    SERIAL = "serial"
+    PARALLEL = "parallel"
+
+
 class CommandCreate(BaseModel):
     command: str = Field(min_length=1)
     cwd: str | None = None
+    queue: QueueMode = QueueMode.SERIAL
 
 
 class CommandRecord(BaseModel):
     id: int
     command: str
     cwd: str | None
+    queue: QueueMode
     status: CommandStatus
     submitted_at: datetime
     started_at: datetime | None
@@ -44,6 +51,8 @@ class QueueSnapshot(BaseModel):
     running: list[CommandRecord]
     pending: list[CommandRecord]
     errors: list[CommandRecord]
+    serial: list[CommandRecord]
+    parallel: list[CommandRecord]
 
 
 class CommandLogs(BaseModel):

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cmddock"
-version = "0.1.0"
-description = "A local command queue daemon that executes submitted commands serially."
+version = "0.2.0"
+description = "A local command queue daemon with serial and parallel execution modes."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }

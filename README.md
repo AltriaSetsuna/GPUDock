@@ -1,13 +1,14 @@
 # CmdDock
 
-CmdDock is a local command queue daemon. It accepts commands, records their lifecycle, and executes them one at a time in submission order.
+CmdDock is a local command queue daemon. It accepts commands, records their lifecycle, and executes them through either a serial queue or a parallel queue.
 
 It is designed for single-machine use: simple enough to run locally, but structured like a maintainable open source project.
 
 ## Features
 
 - Submit shell commands through an HTTP API or CLI.
-- Execute commands serially with a single background worker.
+- Execute `serial` commands one at a time with a single background worker.
+- Execute `parallel` commands immediately by dispatching all pending parallel work.
 - Persist queue state in SQLite.
 - Record submission time, finish time, and exit status for every command.
 - Requeue killed commands immediately so the killed command runs again next.
@@ -29,6 +30,7 @@ In another terminal:
 
 ```bash
 cmddock add "echo hello"
+cmddock add "python download.py" --queue parallel
 cmddock queue
 cmddock errors
 cmddock logs 1
@@ -44,7 +46,15 @@ By default, CmdDock listens on `127.0.0.1:8765` and stores state under `.cmddock
 ```bash
 curl -X POST http://127.0.0.1:8765/commands \
   -H 'content-type: application/json' \
-  -d '{"command": "echo hello"}'
+  -d '{"command": "echo hello", "queue": "serial"}'
+```
+
+Parallel commands use the same endpoint:
+
+```bash
+curl -X POST http://127.0.0.1:8765/commands \
+  -H 'content-type: application/json' \
+  -d '{"command": "python download.py", "queue": "parallel"}'
 ```
 
 ### Query queue state
@@ -57,6 +67,8 @@ curl http://127.0.0.1:8765/queue
 
 ```bash
 curl http://127.0.0.1:8765/commands
+curl 'http://127.0.0.1:8765/commands?queue=parallel'
+curl 'http://127.0.0.1:8765/commands?status=error'
 ```
 
 All query endpoints return newest records first.
@@ -82,9 +94,21 @@ Important behavior:
 
 - A command with exit code `0` becomes `succeeded`.
 - A command that exits by itself with a non-zero exit code becomes `error`.
-- A command killed by signal becomes `pending` again and is scheduled before other pending commands.
+- A killed serial command becomes `pending` again and is scheduled before other serial commands.
+- A killed parallel command becomes `pending` again and is dispatched again by the parallel dispatcher.
 - A pending command can be canceled.
 - A running command can be killed with `cmddock kill <id>` or `POST /commands/{id}/kill`.
+
+## Queue Modes
+
+CmdDock stores all commands in one table and uses the `queue` field to choose the execution strategy.
+
+| Queue | Behavior |
+| --- | --- |
+| `serial` | Claims one pending command at a time, preserving oldest-first execution order. |
+| `parallel` | Claims all pending parallel commands and starts them immediately. |
+
+The default queue is `serial`, so existing usage remains conservative.
 
 ## Project Layout
 
@@ -96,7 +120,7 @@ src/cmddock/
 ├── database.py   # SQLite schema and queries
 ├── models.py     # Pydantic response/request models
 ├── runner.py     # subprocess execution logic
-└── worker.py     # serial worker loop
+└── worker.py     # serial worker and parallel dispatcher
 ```
 
 ## Development
@@ -106,6 +130,10 @@ uv pip install -e ".[dev]"
 pytest
 ruff check .
 ```
+
+## Version
+
+Current version: `0.2.0`
 
 ## License
 
