@@ -14,42 +14,37 @@ from cmddock.models import (
     CommandCreate,
     CommandList,
     CommandLogs,
+    CommandOrderUpdate,
     CommandRecord,
     CommandStatus,
-    QueueMode,
-    QueueSnapshot,
+    SchedulerSnapshot,
+    TaskGroupCreate,
+    TaskGroupList,
+    TaskGroupRecord,
 )
 from cmddock.process_control import terminate_process_group
 from cmddock.web import render_index
-from cmddock.worker import CommandWorker, ParallelDispatcher
+from cmddock.worker import GroupScheduler
 
 
 class AppState:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.database = Database(settings.database_path)
-        self.worker = CommandWorker(
-            self.database,
-            settings.logs_dir,
-            settings.poll_interval_seconds,
-        )
-        self.parallel_dispatcher = ParallelDispatcher(
+        self.scheduler = GroupScheduler(
             self.database,
             settings.logs_dir,
             settings.poll_interval_seconds,
         )
 
     def start_workers(self) -> None:
-        self.worker.start()
-        self.parallel_dispatcher.start()
+        self.scheduler.start()
 
     def stop_workers(self) -> None:
-        self.worker.stop()
-        self.parallel_dispatcher.stop()
+        self.scheduler.stop()
 
     def wake_workers(self) -> None:
-        self.worker.wake()
-        self.parallel_dispatcher.wake()
+        self.scheduler.wake()
 
 
 def build_app(settings: Settings) -> FastAPI:
@@ -66,8 +61,8 @@ def build_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(
         title="GPUDock",
-        version="0.3.0",
-        summary="Local GPU script scheduler for idle GPUs",
+        version="0.4.0",
+        summary="Local GPU script scheduler with serial task groups",
         lifespan=lifespan,
     )
 
@@ -88,6 +83,101 @@ def build_app(settings: Settings) -> FastAPI:
     def ui() -> HTMLResponse:
         return HTMLResponse(render_index())
 
+    @app.post("/groups", response_model=TaskGroupRecord, status_code=201)
+    def create_group(
+        payload: TaskGroupCreate,
+        app_state: AppState = state_dependency,
+    ) -> dict:
+        try:
+            return app_state.database.create_task_group(payload.name, payload.description)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/groups", response_model=TaskGroupList)
+    def list_groups(
+        include_archived: Annotated[bool, Query()] = False,
+        app_state: AppState = state_dependency,
+    ) -> dict[str, list[dict]]:
+        return {
+            "groups": app_state.database.list_task_groups(include_archived=include_archived),
+        }
+
+    @app.get("/groups/{group_id}", response_model=TaskGroupRecord)
+    def get_group(
+        group_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict:
+        try:
+            return app_state.database.get_task_group(group_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/groups/{group_id}", response_model=TaskGroupRecord)
+    def delete_group(
+        group_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict:
+        try:
+            return app_state.database.delete_task_group(group_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/groups/{group_id}/start", response_model=TaskGroupRecord)
+    def start_group(
+        group_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict:
+        try:
+            record = app_state.database.start_task_group(group_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        app_state.wake_workers()
+        return record
+
+    @app.post("/groups/{group_id}/pause", response_model=TaskGroupRecord)
+    def pause_group(
+        group_id: int,
+        app_state: AppState = state_dependency,
+    ) -> dict:
+        try:
+            return app_state.database.pause_task_group(group_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/groups/{group_id}/commands", response_model=CommandList)
+    def list_group_commands(
+        group_id: int,
+        status: Annotated[CommandStatus | None, Query()] = None,
+        app_state: AppState = state_dependency,
+    ) -> dict[str, list[dict]]:
+        try:
+            app_state.database.get_task_group(group_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {
+            "commands": app_state.database.list_commands(status=status, group_id=group_id),
+        }
+
+    @app.patch("/groups/{group_id}/commands/order", response_model=CommandList)
+    def reorder_group_commands(
+        group_id: int,
+        payload: CommandOrderUpdate,
+        app_state: AppState = state_dependency,
+    ) -> dict[str, list[dict]]:
+        try:
+            commands = app_state.database.reorder_pending_commands(group_id, payload.command_ids)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"commands": commands}
+
     @app.post("/commands", response_model=CommandRecord, status_code=201)
     def create_command(
         payload: CommandCreate,
@@ -96,24 +186,27 @@ def build_app(settings: Settings) -> FastAPI:
         try:
             parsed = parse_submission_command(payload.command)
             gpu_count = parse_gpu_count(payload.command)
+            record = app_state.database.create_command(
+                parsed.command,
+                payload.cwd,
+                group_id=payload.group_id,
+                gpu_count=gpu_count,
+                group_name=payload.group_name,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        record = app_state.database.create_command(
-            parsed.command,
-            payload.cwd,
-            payload.queue,
-            gpu_count,
-        )
         app_state.wake_workers()
         return record
 
     @app.get("/commands", response_model=CommandList)
     def list_commands(
         status: Annotated[CommandStatus | None, Query()] = None,
-        queue: Annotated[QueueMode | None, Query()] = None,
+        group_id: Annotated[int | None, Query()] = None,
         app_state: AppState = state_dependency,
     ) -> dict[str, list[dict]]:
-        return {"commands": app_state.database.list_commands(status=status, queue=queue)}
+        return {
+            "commands": app_state.database.list_commands(status=status, group_id=group_id),
+        }
 
     @app.get("/commands/{command_id}", response_model=CommandRecord)
     def get_command(
@@ -191,9 +284,9 @@ def build_app(settings: Settings) -> FastAPI:
         stderr = _read_text_file(record["stderr_path"])
         return {"id": command_id, "stdout": stdout, "stderr": stderr}
 
-    @app.get("/queue", response_model=QueueSnapshot)
+    @app.get("/queue", response_model=SchedulerSnapshot)
     def queue(app_state: AppState = state_dependency) -> dict[str, list[dict]]:
-        return app_state.database.queue_snapshot()
+        return app_state.database.scheduler_snapshot()
 
     return app
 

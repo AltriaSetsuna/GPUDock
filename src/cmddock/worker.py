@@ -14,7 +14,7 @@ from cmddock.gpu import (
     release_reserved_gpus,
     reserve_idle_gpus,
 )
-from cmddock.models import CommandStatus, QueueMode
+from cmddock.models import CommandStatus
 from cmddock.runner import start_command_process, wait_for_process
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class CommandRunner:
         except GPUSchedulingError as exc:
             self.database.requeue_waiting_for_gpu(command_id, str(exc))
             return False
-        except Exception as exc:  # noqa: BLE001 - invalid script belongs in error queue.
+        except Exception as exc:  # noqa: BLE001 - invalid scripts belong in the error state.
             logger.exception("Command %s failed validation before launch", command_id)
             self.database.mark_error(command_id, None, "validation_error", str(exc))
             return True
@@ -79,7 +79,7 @@ class CommandRunner:
                 command_id=command_id,
             )
             result = wait_for_process(process)
-        except Exception as exc:  # noqa: BLE001 - unexpected runner failure belongs in error queue.
+        except Exception as exc:  # noqa: BLE001 - runner failures belong in the error state.
             logger.exception("Command %s failed before subprocess completion", command_id)
             self.database.mark_error(command_id, None, "runner_exception", str(exc))
             return True
@@ -100,54 +100,7 @@ class CommandRunner:
         return True
 
 
-class CommandWorker:
-    def __init__(
-        self,
-        database: Database,
-        logs_dir: Path,
-        poll_interval_seconds: float = 1.0,
-    ) -> None:
-        self.database = database
-        self.logs_dir = logs_dir
-        self.poll_interval_seconds = poll_interval_seconds
-        self.runner = CommandRunner(database, logs_dir)
-        self._condition = threading.Condition()
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        recovered = self.database.recover_interrupted_running_commands(QueueMode.SERIAL)
-        if recovered:
-            logger.warning("Requeued %s interrupted running command(s)", recovered)
-        self._thread = threading.Thread(target=self.run_forever, name="cmddock-worker", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        self.wake()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-
-    def wake(self) -> None:
-        with self._condition:
-            self._condition.notify_all()
-
-    def run_forever(self) -> None:
-        while not self._stop_event.is_set():
-            command = self.database.claim_next_pending_command(QueueMode.SERIAL)
-            if command is None:
-                with self._condition:
-                    self._condition.wait(timeout=self.poll_interval_seconds)
-                continue
-            launched = self.runner.run_one(command)
-            if not launched:
-                with self._condition:
-                    self._condition.wait(timeout=self.poll_interval_seconds)
-
-
-class ParallelDispatcher:
+class GroupScheduler:
     def __init__(
         self,
         database: Database,
@@ -167,12 +120,12 @@ class ParallelDispatcher:
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
-        recovered = self.database.recover_interrupted_running_commands(QueueMode.PARALLEL)
+        recovered = self.database.recover_interrupted_running_commands()
         if recovered:
-            logger.warning("Requeued %s interrupted parallel command(s)", recovered)
+            logger.warning("Requeued %s interrupted running command(s)", recovered)
         self._thread = threading.Thread(
             target=self.run_forever,
-            name="cmddock-parallel-dispatcher",
+            name="gpudock-group-scheduler",
             daemon=True,
         )
         self._thread.start()
@@ -191,7 +144,7 @@ class ParallelDispatcher:
         while not self._stop_event.is_set():
             dispatched = False
             while not self._stop_event.is_set():
-                command = self.database.claim_next_pending_command(QueueMode.PARALLEL)
+                command = self.database.claim_next_pending_command()
                 if command is None:
                     break
                 dispatched = True
@@ -204,7 +157,7 @@ class ParallelDispatcher:
         thread = threading.Thread(
             target=self._run_and_forget,
             args=(command,),
-            name=f"cmddock-parallel-{command['id']}",
+            name=f"gpudock-command-{command['id']}",
             daemon=True,
         )
         with self._running_lock:

@@ -12,12 +12,12 @@ from cmddock.api import build_app
 from cmddock.config import build_settings
 from cmddock.database import Database
 from cmddock.gpu import parse_gpu_count, parse_submission_command
-from cmddock.models import CommandStatus, QueueMode
+from cmddock.models import CommandStatus
 from cmddock.process_control import terminate_process_group
-from cmddock.worker import CommandWorker, ParallelDispatcher
+from cmddock.worker import GroupScheduler
 
 app = typer.Typer(
-    help="GPUDock: a local GPU script scheduler with serial and parallel execution modes.",
+    help="GPUDock: a local GPU script scheduler with serial task groups.",
     no_args_is_help=True,
 )
 
@@ -28,9 +28,95 @@ def serve(
     port: Annotated[int, typer.Option(help="Bind port.")] = 8765,
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Start the HTTP API and GPU schedulers."""
+    """Start the HTTP API and task-group scheduler."""
     settings = build_settings(data_dir=data_dir, host=host, port=port)
     uvicorn.run(build_app(settings), host=settings.host, port=settings.port)
+
+
+@app.command("create-group")
+def create_group(
+    name: Annotated[str, typer.Argument(help="Task group name.")],
+    description: Annotated[str | None, typer.Option(help="Optional description.")] = None,
+    data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+) -> None:
+    """Create a task group."""
+    settings = build_settings(data_dir=data_dir)
+    database = Database(settings.database_path)
+    typer.echo(_to_json(database.create_task_group(name, description)))
+
+
+@app.command("delete-group")
+def delete_group(
+    group_id: Annotated[int, typer.Argument(help="Task group ID.")],
+    data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+) -> None:
+    """Archive a completed task group."""
+    settings = build_settings(data_dir=data_dir)
+    database = Database(settings.database_path)
+    try:
+        typer.echo(_to_json(database.delete_task_group(group_id)))
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="group_id") from exc
+
+
+@app.command("start-group")
+def start_group(
+    group_id: Annotated[int, typer.Argument(help="Task group ID.")],
+    data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+) -> None:
+    """Start a prepared task group."""
+    settings = build_settings(data_dir=data_dir)
+    database = Database(settings.database_path)
+    try:
+        typer.echo(_to_json(database.start_task_group(group_id)))
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="group_id") from exc
+
+
+@app.command("pause-group")
+def pause_group(
+    group_id: Annotated[int, typer.Argument(help="Task group ID.")],
+    data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+) -> None:
+    """Pause future claims for a task group."""
+    settings = build_settings(data_dir=data_dir)
+    database = Database(settings.database_path)
+    try:
+        typer.echo(_to_json(database.pause_task_group(group_id)))
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="group_id") from exc
+
+
+@app.command("reorder-group")
+def reorder_group(
+    group_id: Annotated[int, typer.Argument(help="Task group ID.")],
+    command_ids: Annotated[
+        list[int],
+        typer.Argument(help="Pending command IDs in the desired execution order."),
+    ],
+    data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+) -> None:
+    """Replace the pending-command order for a draft task group."""
+    settings = build_settings(data_dir=data_dir)
+    database = Database(settings.database_path)
+    try:
+        typer.echo(_to_json(database.reorder_pending_commands(group_id, command_ids)))
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="command_ids") from exc
+
+
+@app.command()
+def groups(
+    include_archived: Annotated[
+        bool,
+        typer.Option(help="Include archived task groups."),
+    ] = False,
+    data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+) -> None:
+    """List task groups, newest activity first."""
+    settings = build_settings(data_dir=data_dir)
+    database = Database(settings.database_path)
+    typer.echo(_to_json(database.list_task_groups(include_archived=include_archived)))
 
 
 @app.command()
@@ -42,25 +128,25 @@ def add(
         ),
     ],
     cwd: Annotated[Path | None, typer.Option(help="Working directory for the command.")] = None,
-    queue: Annotated[QueueMode, typer.Option(help="Execution queue: serial or parallel.")] = (
-        QueueMode.SERIAL
-    ),
+    group: Annotated[str, typer.Option(help="Task group name.")] = "default",
+    group_id: Annotated[int | None, typer.Option(help="Existing task group ID.")] = None,
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Add a validated GPU script command to the local SQLite queue."""
+    """Add a validated GPU script command to a task group."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
     try:
         parsed = parse_submission_command(command)
         gpu_count = parse_gpu_count(command)
+        record = database.create_command(
+            parsed.command,
+            str(cwd) if cwd is not None else None,
+            group_id=group_id,
+            gpu_count=gpu_count,
+            group_name=None if group_id is not None else group,
+        )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="command") from exc
-    record = database.create_command(
-        parsed.command,
-        str(cwd) if cwd is not None else None,
-        queue,
-        gpu_count,
-    )
     typer.echo(_to_json(record))
 
 
@@ -68,57 +154,51 @@ def add(
 def worker(
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Run serial and parallel GPU schedulers for the local queue."""
+    """Run the task-group GPU scheduler."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
-    command_worker = CommandWorker(database, settings.logs_dir, settings.poll_interval_seconds)
-    parallel_dispatcher = ParallelDispatcher(
-        database,
-        settings.logs_dir,
-        settings.poll_interval_seconds,
-    )
-    command_worker.start()
-    parallel_dispatcher.start()
+    scheduler = GroupScheduler(database, settings.logs_dir, settings.poll_interval_seconds)
+    scheduler.start()
     try:
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
         pass
     finally:
-        command_worker.stop()
-        parallel_dispatcher.stop()
+        scheduler.stop()
 
 
 @app.command()
 def commands(
     status: Annotated[CommandStatus | None, typer.Option(help="Filter by command status.")] = None,
-    queue: Annotated[QueueMode | None, typer.Option(help="Filter by queue mode.")] = None,
+    group_id: Annotated[int | None, typer.Option(help="Filter by task group ID.")] = None,
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
     """List command history, newest first."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
-    typer.echo(_to_json(database.list_commands(status=status, queue=queue)))
+    typer.echo(_to_json(database.list_commands(status=status, group_id=group_id)))
 
 
 @app.command()
 def queue(
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Show running, pending, and error queues, newest first in each group."""
+    """Show scheduler snapshot grouped by status."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
-    typer.echo(_to_json(database.queue_snapshot()))
+    typer.echo(_to_json(database.scheduler_snapshot()))
 
 
 @app.command()
 def errors(
+    group_id: Annotated[int | None, typer.Option(help="Filter by task group ID.")] = None,
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Show the error queue, newest first."""
+    """Show error commands, newest first."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
-    typer.echo(_to_json(database.list_commands(CommandStatus.ERROR)))
+    typer.echo(_to_json(database.list_commands(CommandStatus.ERROR, group_id=group_id)))
 
 
 @app.command()
@@ -129,7 +209,10 @@ def cancel(
     """Cancel a pending command."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
-    typer.echo(_to_json(database.cancel_pending_command(command_id)))
+    try:
+        typer.echo(_to_json(database.cancel_pending_command(command_id)))
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="command_id") from exc
 
 
 @app.command()
@@ -137,10 +220,13 @@ def retry(
     command_id: Annotated[int, typer.Argument(help="Error command ID to retry.")],
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Move an error command back into the pending queue."""
+    """Move an error command back into the pending state."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
-    typer.echo(_to_json(database.retry_error_command(command_id)))
+    try:
+        typer.echo(_to_json(database.retry_error_command(command_id)))
+    except (KeyError, ValueError) as exc:
+        raise typer.BadParameter(str(exc), param_hint="command_id") from exc
 
 
 @app.command()
@@ -148,12 +234,7 @@ def kill(
     command_id: Annotated[int, typer.Argument(help="Running command ID to terminate.")],
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Terminate a running command process group.
-
-    Commands canceled before subprocess launch are marked canceled. Commands with a
-    recorded PID are killed as a process group, including script child processes; the
-    worker observes the signal exit and requeues the killed command so it runs next.
-    """
+    """Terminate a running command process group."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
     try:

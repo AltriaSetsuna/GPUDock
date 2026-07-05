@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Replaced user-facing `serial` / `parallel` queues with task groups.
+- Added task group creation, listing, detail views, and deletion.
+- Changed scheduling so each task group runs serially while different groups run in parallel.
+- Added group-level blocking when a command enters `error`.
+- Restricted task group deletion to groups whose commands all succeeded or were canceled.
+- Updated the dashboard to show task groups first and command details inside each group.
+- Kept legacy database migration support for older queue-based command rows.
+
 ## 0.3.0
 
 - Renamed the user-facing project to GPUDock.

@@ -1,6 +1,6 @@
 # GPUDock Design
 
-GPUDock is a local scheduler for GPU-backed bash scripts. It keeps the simple queue mechanics from CmdDock, but constrains execution to validated script files and GPU availability.
+GPUDock is a local scheduler for GPU-backed bash scripts. It constrains execution to validated script files, stable-idle GPU availability, and task-group ordering.
 
 ## Goals
 
@@ -9,24 +9,45 @@ GPUDock is a local scheduler for GPU-backed bash scripts. It keeps the simple qu
 - Launch tasks only on GPUs that stay below 1% memory usage for 120 seconds.
 - Reserve assigned GPUs locally until the owning task exits.
 - Inject `CUDA_DEVICES` and override `GPU_COUNT` at launch time.
-- Preserve serial and parallel queue modes.
+- Keep new task groups in `draft` until the user explicitly starts them.
+- Let users reorder pending commands inside a draft group before launch.
+- Run commands serially inside each task group.
+- Run different task groups concurrently when GPUs are available.
+- Block a group after a command fails until the failed command is retried or canceled.
 - Requeue tasks that cannot currently acquire enough idle GPUs.
 - Send a startup email after the subprocess starts.
-- Provide a local visual dashboard for submitting and supervising tasks.
+- Provide a local visual dashboard for task-group supervision.
 
 ## Data Model
 
-GPUDock keeps one `commands` table. The `queue` field controls scheduling strategy:
+GPUDock keeps task groups and commands separate:
 
-- `serial` tasks are claimed by the serial worker.
-- `parallel` tasks are claimed by the parallel dispatcher.
+- `task_groups`: group name, description, creation time, archive time, and execution state.
+- `commands`: command text, `group_id`, `position`, lifecycle fields, GPU fields, log paths, and retry ordering.
+
+The old `queue` column from earlier versions is ignored if it exists in an upgraded database. New scheduling decisions use only `group_id`.
 
 GPU-specific fields:
 
-- `gpu_count`: parsed from the script's `GPU_COUNT` assignment.
+- `gpu_count`: parsed from the submitted command or script.
 - `assigned_gpu_ids`: comma-separated GPU IDs injected as `CUDA_DEVICES`.
 
-Keeping one table makes history, logs, retries, kills, and errors uniform across scheduling modes.
+Task group status is derived from commands:
+
+- `empty`: no commands.
+- `draft`: commands exist, but the group has not been started.
+- `running`: at least one command is running.
+- `paused`: no new pending command will be claimed until the group is started again.
+- `blocked`: at least one command is in `error`.
+- `pending`: pending commands remain and the group is not running or blocked.
+- `completed`: every command is `succeeded` or `canceled`.
+- `archived`: the group was deleted.
+
+Task group execution state is stored separately from derived display status:
+
+- `draft`: commands can be added and reordered, but the scheduler ignores the group.
+- `running`: the scheduler may claim the first pending command in the group.
+- `paused`: already running commands may finish, but no later pending command is claimed.
 
 ## Script Validation
 
@@ -69,10 +90,7 @@ A GPU is idle only after it has stayed below the threshold for 120 continuous se
 memory.used / memory.total < 0.01
 ```
 
-GPUDock tracks the first observed low-memory timestamp for each GPU. If a GPU rises
-back to 1% memory usage or higher, its timer is reset. This avoids assigning a card
-that briefly appears free while another process is still starting, shutting down, or
-between allocation phases.
+GPUDock tracks the first observed low-memory timestamp for each GPU. If a GPU rises back to 1% memory usage or higher, its timer is reset. This avoids assigning a card that briefly appears free while another process is still starting, shutting down, or between allocation phases.
 
 If a task needs `GPU_COUNT=n`, GPUDock selects the first `n` stable-idle GPU IDs. If fewer than `n` GPUs are idle, the task returns to `pending` with:
 
@@ -80,11 +98,28 @@ If a task needs `GPU_COUNT=n`, GPUDock selects the first `n` stable-idle GPU IDs
 exit_status = waiting_for_gpu
 ```
 
-Selection and reservation happen together under a process-local lock. This matters
-for parallel tasks: during model startup, a process may not have allocated visible
-GPU memory yet, so a second runner could otherwise observe the same GPU as idle
-and start another large task on it. GPUDock keeps selected GPU IDs reserved until
-the task exits or launch fails.
+Selection and reservation happen together under a process-local lock. During model startup, a process may not have allocated visible GPU memory yet, so another runner could otherwise observe the same GPU as idle and start a large task on it. GPUDock keeps selected GPU IDs reserved until the task exits or launch fails.
+
+## Scheduling
+
+The scheduler is group-aware:
+
+1. It looks for groups whose execution state is `running`.
+2. It skips any group that has an error command.
+3. It chooses the first pending command by `position` from each runnable group.
+4. It launches selected commands in separate runner threads when GPU requirements are met.
+
+This gives the desired behavior:
+
+- same task group: serial execution;
+- different task groups: parallel execution;
+- failed command: blocks only its own task group.
+
+Killed commands are requeued with `run_after_id` so they are selected ahead of later commands in the same group.
+
+Commands can be added and reordered only while their task group is `draft`. This keeps
+the task group as an explicit execution plan: users finish the command list, put the
+first command at the top, then start the whole group.
 
 ## Launch
 
@@ -94,13 +129,9 @@ GPUDock launches scripts with:
 bash /absolute/path/to/script.sh
 ```
 
-Environment assignments submitted before the script are passed into the subprocess
-environment. GPUDock still launches the parsed script path directly with `bash`;
-it does not run the submitted text through a shell.
+Environment assignments submitted before the script are passed into the subprocess environment. GPUDock still launches the parsed script path directly with `bash`; it does not run the submitted text through a shell.
 
-If the submitted command includes `GPU_COUNT=<n>`, that value is used for scheduling
-and for the launched subprocess environment. If it is omitted, GPUDock reads the
-script's last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment.
+If the submitted command includes `GPU_COUNT=<n>`, that value is used for scheduling and for the launched subprocess environment. If it is omitted, GPUDock reads the script's last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment.
 
 It injects:
 
@@ -109,8 +140,7 @@ CUDA_DEVICES=<selected ids>
 GPU_COUNT=<number of selected ids>
 ```
 
-This overrides any submitted or parent `CUDA_DEVICES` value. `GPU_COUNT` comes from
-the submitted command when present, otherwise from the script.
+This overrides any submitted or parent `CUDA_DEVICES` value. `GPU_COUNT` comes from the submitted command when present, otherwise from the script.
 
 ## Email
 
@@ -124,44 +154,21 @@ The notification is sent after `subprocess.Popen(...)` succeeds and the process 
 
 ## Process Control
 
-Scripts are launched in a new process session. The recorded PID is therefore also
-the process group ID for the script tree:
+Scripts are launched in a new process session. The recorded PID is therefore also the process group ID for the script tree:
 
 ```text
 subprocess.Popen(..., start_new_session=True)
 ```
 
-Killing a launched task sends `SIGTERM` to that process group. If the group is
-still present after a short grace period, GPUDock follows up with `SIGKILL`.
-This targets the top-level bash process and child processes started by that
-script.
+Killing a launched task sends `SIGTERM` to that process group. If the group is still present after a short grace period, GPUDock follows up with `SIGKILL`. This targets the top-level bash process and child processes started by that script.
 
-There is also a short pre-launch window where a task is already marked `running`
-but no subprocess PID has been recorded yet. A kill request during that window
-marks the task `canceled` with:
+There is also a short pre-launch window where a task is already marked `running` but no subprocess PID has been recorded yet. A kill request during that window marks the task `canceled` with:
 
 ```text
 exit_status = canceled_before_launch
 ```
 
-Before launching, the worker re-reads the command status. The final status check,
-subprocess launch, PID recording, and assigned-GPU recording happen while holding
-the scheduler database lock. A kill request therefore has only two outcomes: it
-cancels the task before launch, or it sees a recorded process group PID and can
-signal the whole script tree.
-
-## Queue Modes
-
-### Serial Worker
-
-The serial worker claims one pending `serial` task at a time. If there are not enough idle GPUs, the task is returned to `pending` and the worker waits before retrying.
-
-### Parallel Dispatcher
-
-The parallel dispatcher claims pending `parallel` tasks and starts a runner thread for each task. Each runner independently checks GPU availability immediately before launch. If insufficient GPUs are available, that task is returned to `pending`.
-
-Because GPU IDs are reserved locally when selected, concurrently launched parallel
-tasks cannot receive the same GPU from the same GPUDock process.
+Before launching, the worker re-reads the command status. The final status check, subprocess launch, PID recording, and assigned-GPU recording happen while holding the scheduler database lock. A kill request therefore has only two outcomes: it cancels the task before launch, or it sees a recorded process group PID and can signal the whole script tree.
 
 ## Visual Dashboard
 
@@ -169,12 +176,16 @@ The FastAPI service exposes a local dashboard at `/` and `/ui`.
 
 The dashboard is intentionally thin: it calls the same HTTP endpoints as external clients instead of duplicating scheduler logic. It supports:
 
-- submitting absolute `.sh` script paths or env-prefixed bash launch commands;
-- selecting `serial` or `parallel` queue mode;
-- filtering tasks by queue and status;
+- creating task groups;
+- viewing group summaries before command details;
+- opening a draft group to submit commands;
+- moving pending commands up or down before the group starts;
+- starting a prepared group;
+- pausing a running group so no later pending command is claimed;
 - viewing GPU requirements, assigned GPU IDs, and submission timestamps;
 - opening stdout/stderr logs;
-- retrying, canceling, or killing tasks through the existing control endpoints.
+- retrying, canceling, or killing commands;
+- deleting completed or empty groups.
 
 This keeps the browser UI replaceable while the API remains the source of truth.
 
@@ -185,10 +196,12 @@ GPUDock distinguishes:
 1. Self failure
    - Non-zero exit code.
    - Moves to `error`.
+   - Blocks later commands in the same group.
 
 2. Kill by signal
    - Negative process return code.
    - Moves back to `pending`.
+   - Runs next inside its group.
 
 3. Insufficient GPU availability
    - Scheduler condition, not a script failure.
@@ -202,10 +215,16 @@ GPUDock distinguishes:
 
 ## Query Order
 
-All query surfaces return newest records first:
+User-facing query surfaces return newest records first:
 
+- `GET /groups`
 - `GET /commands`
-- `GET /queue`
 - `GET /commands?status=...`
-- `GET /commands?queue=...`
 - CLI command lists
+
+Group-specific command views return planned execution order instead:
+
+- `GET /groups/{id}/commands`
+- `GET /commands?group_id=...`
+
+In group views, the first command shown is the next command that should run.

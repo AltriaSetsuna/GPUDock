@@ -4,8 +4,8 @@ import time
 
 from cmddock.database import Database
 from cmddock.gpu import GPUReservation
-from cmddock.models import CommandStatus, QueueMode
-from cmddock.worker import CommandRunner, CommandWorker, ParallelDispatcher
+from cmddock.models import CommandStatus
+from cmddock.worker import CommandRunner, GroupScheduler
 
 
 def _wait_for_statuses(
@@ -30,7 +30,7 @@ def _write_script(tmp_path, name: str, body: str):
     return script
 
 
-def test_serial_worker_and_parallel_dispatcher_process_isolated_queues(tmp_path, monkeypatch):
+def test_group_scheduler_runs_one_command_per_group_at_a_time(tmp_path, monkeypatch):
     database = Database(tmp_path / "cmddock.db")
     logs_dir = tmp_path / "logs"
     monkeypatch.setattr(
@@ -40,39 +40,40 @@ def test_serial_worker_and_parallel_dispatcher_process_isolated_queues(tmp_path,
     monkeypatch.setattr("cmddock.worker.release_reserved_gpus", lambda gpu_ids: None)
     monkeypatch.setattr("cmddock.worker.send_launch_email_async", lambda **kwargs: None)
 
-    serial_script = _write_script(tmp_path, "serial.sh", "printf serial")
-    parallel_one_script = _write_script(tmp_path, "parallel-one.sh", "printf parallel-one")
-    parallel_two_script = _write_script(tmp_path, "parallel-two.sh", "printf parallel-two")
+    group_one = database.create_task_group("group-one")
+    group_two = database.create_task_group("group-two")
+    one_first_script = _write_script(tmp_path, "one-first.sh", "printf one-first")
+    one_second_script = _write_script(tmp_path, "one-second.sh", "printf one-second")
+    two_first_script = _write_script(tmp_path, "two-first.sh", "printf two-first")
 
-    serial = database.create_command(str(serial_script), None, QueueMode.SERIAL, 1)
-    parallel_one = database.create_command(str(parallel_one_script), None, QueueMode.PARALLEL, 1)
-    parallel_two = database.create_command(str(parallel_two_script), None, QueueMode.PARALLEL, 1)
+    one_first = database.create_command(str(one_first_script), None, group_id=group_one["id"])
+    one_second = database.create_command(str(one_second_script), None, group_id=group_one["id"])
+    two_first = database.create_command(str(two_first_script), None, group_id=group_two["id"])
+    database.start_task_group(group_one["id"])
+    database.start_task_group(group_two["id"])
 
-    serial_worker = CommandWorker(database, logs_dir, poll_interval_seconds=0.05)
-    parallel_dispatcher = ParallelDispatcher(database, logs_dir, poll_interval_seconds=0.05)
-    serial_worker.start()
-    parallel_dispatcher.start()
+    scheduler = GroupScheduler(database, logs_dir, poll_interval_seconds=0.05)
+    scheduler.start()
     try:
         _wait_for_statuses(
             database,
             {
-                serial["id"]: CommandStatus.SUCCEEDED,
-                parallel_one["id"]: CommandStatus.SUCCEEDED,
-                parallel_two["id"]: CommandStatus.SUCCEEDED,
+                one_first["id"]: CommandStatus.SUCCEEDED,
+                one_second["id"]: CommandStatus.SUCCEEDED,
+                two_first["id"]: CommandStatus.SUCCEEDED,
             },
         )
     finally:
-        serial_worker.stop()
-        parallel_dispatcher.stop()
+        scheduler.stop()
 
-    serial_records = database.list_commands(queue=QueueMode.SERIAL)
-    parallel_records = database.list_commands(queue=QueueMode.PARALLEL)
+    group_one_records = database.list_commands(group_id=group_one["id"])
+    group_two_records = database.list_commands(group_id=group_two["id"])
 
-    assert [record["id"] for record in serial_records] == [serial["id"]]
-    assert {record["id"] for record in parallel_records} == {parallel_one["id"], parallel_two["id"]}
-    assert (logs_dir / f"{serial['id']}.stdout.log").read_text() == "serial"
-    assert (logs_dir / f"{parallel_one['id']}.stdout.log").read_text() == "parallel-one"
-    assert (logs_dir / f"{parallel_two['id']}.stdout.log").read_text() == "parallel-two"
+    assert [record["id"] for record in group_one_records] == [one_first["id"], one_second["id"]]
+    assert [record["id"] for record in group_two_records] == [two_first["id"]]
+    assert (logs_dir / f"{one_first['id']}.stdout.log").read_text() == "one-first"
+    assert (logs_dir / f"{one_second['id']}.stdout.log").read_text() == "one-second"
+    assert (logs_dir / f"{two_first['id']}.stdout.log").read_text() == "two-first"
 
 
 def test_command_runner_passes_submission_env_overrides(tmp_path, monkeypatch):
@@ -91,8 +92,9 @@ def test_command_runner_passes_submission_env_overrides(tmp_path, monkeypatch):
         'printf "%s|%s|%s" "$DATA_PATH" "$CUDA_DEVICES" "$GPU_COUNT"',
     )
     command = f"DATA_PATH=/home/data.json bash {script}"
-    record = database.create_command(command, None, QueueMode.SERIAL, 1)
-    claimed = database.claim_next_pending_command(QueueMode.SERIAL)
+    record = database.create_command(command, None)
+    database.start_task_group(record["group_id"])
+    claimed = database.claim_next_pending_command()
 
     launched = CommandRunner(database, logs_dir).run_one(claimed)
 
@@ -107,8 +109,9 @@ def test_command_runner_does_not_launch_after_prelaunch_cancel(tmp_path, monkeyp
     released_gpu_ids = []
 
     script = _write_script(tmp_path, "cancel-before-launch.sh", "printf should-not-run")
-    record = database.create_command(str(script), None, QueueMode.SERIAL, 1)
-    claimed = database.claim_next_pending_command(QueueMode.SERIAL)
+    record = database.create_command(str(script), None)
+    database.start_task_group(record["group_id"])
+    claimed = database.claim_next_pending_command()
 
     def reserve_then_cancel(gpu_count):
         database.cancel_unlaunched_running_command(record["id"])

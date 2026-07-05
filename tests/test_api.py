@@ -17,5 +17,5 @@ def test_list_commands_endpoint_treats_app_state_as_dependency(tmp_path):
     query_param_names = {param.name for param in route.dependant.query_params}
     dependency_names = {dependency.name for dependency in route.dependant.dependencies}
 
-    assert query_param_names == {"status", "queue"}
+    assert query_param_names == {"status", "group_id"}
     assert dependency_names == {"app_state"}

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gpudock"
-version = "0.3.0"
-description = "A local GPU script scheduler that launches bash scripts on idle GPUs."
+version = "0.4.0"
+description = "A local GPU task-group scheduler that launches bash scripts on idle GPUs."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
