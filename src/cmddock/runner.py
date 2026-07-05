@@ -38,11 +38,26 @@ def run_command(
     env: dict[str, str] | None = None,
     after_start: Callable[[], None] | None = None,
 ) -> RunResult:
+    process = start_command_process(command, cwd, stdout_path, stderr_path, env=env)
+    if on_start is not None:
+        on_start(process.pid)
+    if after_start is not None:
+        after_start()
+    return wait_for_process(process)
+
+
+def start_command_process(
+    command: str,
+    cwd: str | None,
+    stdout_path: Path,
+    stderr_path: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen:
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
 
     with stdout_path.open("ab") as stdout_file, stderr_path.open("ab") as stderr_file:
-        process = subprocess.Popen(
+        return subprocess.Popen(
             ["bash", command],
             cwd=cwd,
             stdout=stdout_file,
@@ -50,12 +65,10 @@ def run_command(
             start_new_session=True,
             env=env or os.environ.copy(),
         )
-        if on_start is not None:
-            on_start(process.pid)
-        if after_start is not None:
-            after_start()
-        exit_code = process.wait()
 
+
+def wait_for_process(process: subprocess.Popen) -> RunResult:
+    exit_code = process.wait()
     exit_status, killed = classify_exit_code(exit_code)
     error_message = None if exit_code == 0 else exit_status
     return RunResult(

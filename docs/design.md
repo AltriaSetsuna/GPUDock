@@ -122,6 +122,34 @@ Startup notification follows the approach in `/home/yijiali/python.py`:
 
 The notification is sent after `subprocess.Popen(...)` succeeds and the process ID has been recorded.
 
+## Process Control
+
+Scripts are launched in a new process session. The recorded PID is therefore also
+the process group ID for the script tree:
+
+```text
+subprocess.Popen(..., start_new_session=True)
+```
+
+Killing a launched task sends `SIGTERM` to that process group. If the group is
+still present after a short grace period, GPUDock follows up with `SIGKILL`.
+This targets the top-level bash process and child processes started by that
+script.
+
+There is also a short pre-launch window where a task is already marked `running`
+but no subprocess PID has been recorded yet. A kill request during that window
+marks the task `canceled` with:
+
+```text
+exit_status = canceled_before_launch
+```
+
+Before launching, the worker re-reads the command status. The final status check,
+subprocess launch, PID recording, and assigned-GPU recording happen while holding
+the scheduler database lock. A kill request therefore has only two outcomes: it
+cancels the task before launch, or it sees a recorded process group PID and can
+signal the whole script tree.
+
 ## Queue Modes
 
 ### Serial Worker

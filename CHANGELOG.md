@@ -14,6 +14,9 @@
 - Accepted env-prefixed bash launch commands such as `DATA_PATH=/x bash /train.sh`.
 - Made submitted `GPU_COUNT=<n>` override script-level `GPU_COUNT` parsing.
 - Added process-local GPU reservations to prevent parallel launches from sharing one GPU.
+- Documented and tested process-group killing so script child processes are signaled.
+- Allowed kill requests during the pre-launch running window before a PID is recorded.
+- Added SIGKILL fallback when a killed process group survives SIGTERM.
 
 ## 0.2.0
 

@@ -63,6 +63,54 @@ def test_running_pid_is_recorded_and_cleared_on_finish(tmp_path):
     assert finished["pid"] is None
 
 
+def test_unlaunched_running_command_can_be_canceled(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("sleep 10", None)
+    claimed = database.claim_next_pending_command(QueueMode.SERIAL)
+
+    assert claimed["id"] == command["id"]
+    assert claimed["status"] == CommandStatus.RUNNING
+    assert claimed["pid"] is None
+
+    canceled = database.cancel_unlaunched_running_command(command["id"])
+
+    assert canceled["status"] == CommandStatus.CANCELED
+    assert canceled["finished_at"] is not None
+    assert canceled["exit_status"] == "canceled_before_launch"
+    assert canceled["pid"] is None
+    assert canceled["assigned_gpu_ids"] is None
+
+
+def test_start_process_if_running_records_pid_and_assigned_gpus(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("sleep 10", None)
+    database.claim_next_pending_command(QueueMode.SERIAL)
+
+    class Process:
+        pid = 12345
+
+    process = database.start_process_if_running(command["id"], "0,1", Process)
+
+    assert process.pid == 12345
+    running = database.get_command(command["id"])
+    assert running["pid"] == 12345
+    assert running["assigned_gpu_ids"] == "0,1"
+
+
+def test_start_process_if_running_skips_canceled_command(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("sleep 10", None)
+    database.claim_next_pending_command(QueueMode.SERIAL)
+    database.cancel_unlaunched_running_command(command["id"])
+
+    def fail_if_called():
+        raise AssertionError("process should not launch after cancellation")
+
+    process = database.start_process_if_running(command["id"], "0", fail_if_called)
+
+    assert process is None
+
+
 def test_queue_snapshot_is_newest_first_within_each_status(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     first = database.create_command("echo first", None)

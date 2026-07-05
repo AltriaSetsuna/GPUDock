@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -214,6 +214,30 @@ class Database:
             )
             return self.get_command(command_id, conn=conn)
 
+    def cancel_unlaunched_running_command(self, command_id: int) -> dict[str, Any]:
+        with self._lock, self.connect() as conn:
+            existing = self.get_command(command_id, conn=conn)
+            if existing["status"] != CommandStatus.RUNNING:
+                raise ValueError("Only running commands can be canceled before launch.")
+            if existing["pid"] is not None:
+                raise ValueError("Running command already has a recorded process ID.")
+            conn.execute(
+                """
+                UPDATE commands
+                SET status = ?,
+                    finished_at = ?,
+                    exit_code = NULL,
+                    exit_status = 'canceled_before_launch',
+                    pid = NULL,
+                    assigned_gpu_ids = NULL,
+                    error_message = 'Canceled before the subprocess was launched.',
+                    run_after_id = NULL
+                WHERE id = ? AND status = ? AND pid IS NULL
+                """,
+                (CommandStatus.CANCELED, utc_now(), command_id, CommandStatus.RUNNING),
+            )
+            return self.get_command(command_id, conn=conn)
+
     def retry_error_command(self, command_id: int) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
             existing = self.get_command(command_id, conn=conn)
@@ -360,6 +384,29 @@ class Database:
                 "UPDATE commands SET assigned_gpu_ids = ? WHERE id = ? AND status = ?",
                 (assigned_gpu_ids, command_id, CommandStatus.RUNNING),
             )
+
+    def start_process_if_running(
+        self,
+        command_id: int,
+        assigned_gpu_ids: str,
+        launch_process: Callable[[], Any],
+    ) -> Any | None:
+        with self._lock, self.connect() as conn:
+            existing = self.get_command(command_id, conn=conn)
+            if existing["status"] != CommandStatus.RUNNING:
+                return None
+
+            process = launch_process()
+            conn.execute(
+                """
+                UPDATE commands
+                SET pid = ?,
+                    assigned_gpu_ids = ?
+                WHERE id = ? AND status = ?
+                """,
+                (process.pid, assigned_gpu_ids, command_id, CommandStatus.RUNNING),
+            )
+            return process
 
     def get_kill_target(self, command_id: int) -> dict[str, Any]:
         with self._lock, self.connect() as conn:

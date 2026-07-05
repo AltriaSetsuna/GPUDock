@@ -14,7 +14,9 @@ It is designed for a shared single-machine GPU server: simple enough to run loca
 - Execute `serial` tasks one at a time.
 - Execute `parallel` tasks by dispatching all pending parallel work.
 - Requeue tasks when not enough idle GPUs are available.
-- Requeue killed tasks, while self-failed tasks move to `error`.
+- Kill launched tasks by process group, including child processes started by the script.
+  GPUDock sends `SIGTERM` first, then `SIGKILL` if the process group survives.
+- Requeue killed launched tasks, while self-failed tasks move to `error`.
 - Send an email after a script process is successfully started.
 - Store task metadata and logs in SQLite.
 
@@ -111,7 +113,7 @@ When a pending task is claimed:
 4. If enough GPUs are available, it reserves them and launches the script with `bash`.
 5. It injects `CUDA_DEVICES` and overrides `GPU_COUNT`.
 6. It sends a startup email after the process starts.
-7. When the task exits or fails to launch, GPUDock releases the reservation.
+7. When the task exits, is killed, or fails to launch, GPUDock releases the reservation.
 8. If GPUs are insufficient, the task returns to `pending`.
 
 ## HTTP API
@@ -192,6 +194,7 @@ pending -> running -> succeeded
 pending -> running -> error
 pending -> canceled
 running -> killed -> pending
+running -> canceled_before_launch -> canceled
 running -> waiting_for_gpu -> pending
 ```
 
@@ -199,7 +202,11 @@ Important behavior:
 
 - Exit code `0` becomes `succeeded`.
 - Non-zero self exit becomes `error`.
-- Killed tasks return to `pending`.
+- Killed launched tasks receive `SIGTERM` as a process group, followed by
+  `SIGKILL` if needed, so child processes started by the bash script are targeted too.
+- Killed launched tasks return to `pending`.
+- Running tasks that have not launched a subprocess yet can be killed; they are
+  marked `canceled` with `exit_status = canceled_before_launch`.
 - Insufficient stable-idle GPUs return to `pending` with `exit_status = waiting_for_gpu`.
 - Pending tasks can be canceled.
 - Running tasks can be killed with `gpudock kill <id>`.

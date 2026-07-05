@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import signal
 import time
 from pathlib import Path
 from typing import Annotated
@@ -15,6 +13,7 @@ from cmddock.config import build_settings
 from cmddock.database import Database
 from cmddock.gpu import parse_gpu_count, parse_submission_command
 from cmddock.models import CommandStatus, QueueMode
+from cmddock.process_control import terminate_process_group
 from cmddock.worker import CommandWorker, ParallelDispatcher
 
 app = typer.Typer(
@@ -151,12 +150,30 @@ def kill(
 ) -> None:
     """Terminate a running command process group.
 
-    The worker observes the signal exit and requeues the killed command so it runs next.
+    Commands canceled before subprocess launch are marked canceled. Commands with a
+    recorded PID are killed as a process group, including script child processes; the
+    worker observes the signal exit and requeues the killed command so it runs next.
     """
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
-    record = database.get_kill_target(command_id)
-    os.killpg(record["pid"], signal.SIGTERM)
+    try:
+        current = database.get_command(command_id)
+        if current["status"] == CommandStatus.RUNNING and current["pid"] is None:
+            typer.echo(_to_json(database.cancel_unlaunched_running_command(command_id)))
+            return
+        record = database.get_kill_target(command_id)
+        terminate_process_group(record["pid"])
+    except KeyError as exc:
+        raise typer.BadParameter(str(exc), param_hint="command_id") from exc
+    except ProcessLookupError as exc:
+        raise typer.BadParameter(
+            "Recorded process is no longer running.",
+            param_hint="command_id",
+        ) from exc
+    except PermissionError as exc:
+        raise typer.BadParameter(str(exc), param_hint="command_id") from exc
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="command_id") from exc
     typer.echo(_to_json(record))
 
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import signal
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -21,6 +19,7 @@ from cmddock.models import (
     QueueMode,
     QueueSnapshot,
 )
+from cmddock.process_control import terminate_process_group
 from cmddock.web import render_index
 from cmddock.worker import CommandWorker, ParallelDispatcher
 
@@ -158,8 +157,13 @@ def build_app(settings: Settings) -> FastAPI:
         app_state: AppState = state_dependency,
     ) -> dict:
         try:
+            current = app_state.database.get_command(command_id)
+            if current["status"] == CommandStatus.RUNNING and current["pid"] is None:
+                record = app_state.database.cancel_unlaunched_running_command(command_id)
+                app_state.wake_workers()
+                return record
             record = app_state.database.get_kill_target(command_id)
-            os.killpg(record["pid"], signal.SIGTERM)
+            terminate_process_group(record["pid"])
             return record
         except ProcessLookupError as exc:
             raise HTTPException(

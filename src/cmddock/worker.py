@@ -14,8 +14,8 @@ from cmddock.gpu import (
     release_reserved_gpus,
     reserve_idle_gpus,
 )
-from cmddock.models import QueueMode
-from cmddock.runner import run_command
+from cmddock.models import CommandStatus, QueueMode
+from cmddock.runner import start_command_process, wait_for_process
 
 logger = logging.getLogger(__name__)
 
@@ -47,29 +47,38 @@ class CommandRunner:
             return True
 
         selected_gpus = reservation.selected_gpu_ids
-        idle_gpus = reservation.idle_gpu_ids
-        cuda_devices = ",".join(str(gpu_id) for gpu_id in selected_gpus)
-        env = os.environ.copy()
-        env.update(parsed.env_overrides)
-        env["CUDA_DEVICES"] = cuda_devices
-        env["GPU_COUNT"] = str(gpu_count)
-        self.database.set_assigned_gpu_ids(command_id, cuda_devices)
-
         try:
-            result = run_command(
-                script_path,
-                command["cwd"],
-                stdout_path,
-                stderr_path,
-                on_start=lambda pid: self.database.set_running_pid(command_id, pid),
-                env=env,
-                after_start=lambda: send_launch_email_async(
-                    script_path=script_path,
-                    selected_gpus=selected_gpus,
-                    idle_gpus=idle_gpus,
-                    command_id=command_id,
+            current = self.database.get_command(command_id)
+            if current["status"] != CommandStatus.RUNNING:
+                return True
+
+            idle_gpus = reservation.idle_gpu_ids
+            cuda_devices = ",".join(str(gpu_id) for gpu_id in selected_gpus)
+            env = os.environ.copy()
+            env.update(parsed.env_overrides)
+            env["CUDA_DEVICES"] = cuda_devices
+            env["GPU_COUNT"] = str(gpu_count)
+            process = self.database.start_process_if_running(
+                command_id,
+                cuda_devices,
+                lambda: start_command_process(
+                    script_path,
+                    command["cwd"],
+                    stdout_path,
+                    stderr_path,
+                    env=env,
                 ),
             )
+            if process is None:
+                return True
+
+            send_launch_email_async(
+                script_path=script_path,
+                selected_gpus=selected_gpus,
+                idle_gpus=idle_gpus,
+                command_id=command_id,
+            )
+            result = wait_for_process(process)
         except Exception as exc:  # noqa: BLE001 - unexpected runner failure belongs in error queue.
             logger.exception("Command %s failed before subprocess completion", command_id)
             self.database.mark_error(command_id, None, "runner_exception", str(exc))

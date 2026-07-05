@@ -92,9 +92,37 @@ def test_command_runner_passes_submission_env_overrides(tmp_path, monkeypatch):
     )
     command = f"DATA_PATH=/home/data.json bash {script}"
     record = database.create_command(command, None, QueueMode.SERIAL, 1)
+    claimed = database.claim_next_pending_command(QueueMode.SERIAL)
 
-    launched = CommandRunner(database, logs_dir).run_one(record)
+    launched = CommandRunner(database, logs_dir).run_one(claimed)
 
     assert launched is True
     assert database.get_command(record["id"])["status"] == CommandStatus.SUCCEEDED
     assert (logs_dir / f"{record['id']}.stdout.log").read_text() == "/home/data.json|3|1"
+
+
+def test_command_runner_does_not_launch_after_prelaunch_cancel(tmp_path, monkeypatch):
+    database = Database(tmp_path / "cmddock.db")
+    logs_dir = tmp_path / "logs"
+    released_gpu_ids = []
+
+    script = _write_script(tmp_path, "cancel-before-launch.sh", "printf should-not-run")
+    record = database.create_command(str(script), None, QueueMode.SERIAL, 1)
+    claimed = database.claim_next_pending_command(QueueMode.SERIAL)
+
+    def reserve_then_cancel(gpu_count):
+        database.cancel_unlaunched_running_command(record["id"])
+        return GPUReservation([0], [0])
+
+    def fail_if_launched(*args, **kwargs):
+        raise AssertionError("start_command_process should not be called after prelaunch cancel")
+
+    monkeypatch.setattr("cmddock.worker.reserve_idle_gpus", reserve_then_cancel)
+    monkeypatch.setattr("cmddock.worker.release_reserved_gpus", released_gpu_ids.extend)
+    monkeypatch.setattr("cmddock.worker.start_command_process", fail_if_launched)
+
+    launched = CommandRunner(database, logs_dir).run_one(claimed)
+
+    assert launched is True
+    assert database.get_command(record["id"])["status"] == CommandStatus.CANCELED
+    assert released_gpu_ids == [0]
