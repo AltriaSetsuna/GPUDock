@@ -7,7 +7,7 @@ It is designed for a shared single-machine GPU server: simple enough to run loca
 ## Features
 
 - Accept only absolute `.sh` bash script paths, with optional `KEY=value` prefixes.
-- Read `GPU_COUNT` from the submitted script.
+- Read `GPU_COUNT` from the submitted command first, then from the script.
 - Use only GPUs whose memory usage stays below 1% for 120 seconds.
 - Override the launched script environment with `CUDA_DEVICES=<ids>` and `GPU_COUNT=<n>`.
 - Execute `serial` tasks one at a time.
@@ -46,7 +46,7 @@ Submit it from the dashboard by entering either the script's absolute path or a
 restricted bash launch command:
 
 ```bash
-DATA_PATH=/home/data.json bash /absolute/path/to/train.sh
+GPU_COUNT=2 DATA_PATH=/home/data.json bash /absolute/path/to/train.sh
 ```
 
 Then choose `serial` or `parallel`.
@@ -55,7 +55,7 @@ The CLI remains available for automation:
 
 ```bash
 gpudock add /absolute/path/to/train.sh
-gpudock add 'DATA_PATH=/home/data.json bash /absolute/path/to/train.sh'
+gpudock add 'GPU_COUNT=2 DATA_PATH=/home/data.json bash /absolute/path/to/train.sh'
 gpudock add /absolute/path/to/eval.sh --queue parallel
 gpudock queue
 gpudock logs 1
@@ -100,7 +100,8 @@ When a pending task is claimed:
 
 1. GPUDock validates that `command` is either an absolute `.sh` path or optional
    `KEY=value` assignments followed by `bash /absolute/path/to/script.sh`.
-2. GPUDock parses the script's last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment.
+2. GPUDock uses submitted `GPU_COUNT=<n>` first; if omitted, it parses the script's
+   last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment.
 3. GPUDock checks for at least `n` GPUs that stayed below 1% memory usage for 120 seconds.
 4. If enough GPUs are available, it launches the script with `bash`.
 5. It injects `CUDA_DEVICES` and overrides `GPU_COUNT`.
@@ -122,7 +123,7 @@ With environment variables:
 ```bash
 curl -X POST http://127.0.0.1:8765/commands \
   -H 'content-type: application/json' \
-  -d '{"command": "DATA_PATH=/home/data.json bash /absolute/path/to/train.sh", "queue": "serial"}'
+  -d '{"command": "GPU_COUNT=2 DATA_PATH=/home/data.json bash /absolute/path/to/train.sh", "queue": "serial"}'
 ```
 
 Parallel tasks use the same endpoint:

@@ -12,6 +12,7 @@
 - Reworked the README quick start for public open-source readers.
 - Changed GPU idleness from an instant sample to a 120-second stable low-memory window.
 - Accepted env-prefixed bash launch commands such as `DATA_PATH=/x bash /train.sh`.
+- Made submitted `GPU_COUNT=<n>` override script-level `GPU_COUNT` parsing.
 
 ## 0.2.0
 

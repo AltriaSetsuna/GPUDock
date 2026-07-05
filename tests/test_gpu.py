@@ -35,6 +35,28 @@ def test_parse_gpu_count_reads_last_assignment(tmp_path):
     assert parse_gpu_count(str(script)) == 2
 
 
+def test_parse_gpu_count_prefers_command_env_assignment(tmp_path):
+    script = tmp_path / "task.sh"
+    script.write_text("export GPU_COUNT=1\n")
+
+    assert parse_gpu_count(f"GPU_COUNT=3 bash {script}") == 3
+
+
+def test_parse_gpu_count_uses_command_env_when_script_is_missing_assignment(tmp_path):
+    script = tmp_path / "task.sh"
+    script.write_text("echo no script GPU_COUNT\n")
+
+    assert parse_gpu_count(f"GPU_COUNT=2 bash {script}") == 2
+
+
+def test_parse_gpu_count_rejects_invalid_command_env_assignment(tmp_path):
+    script = tmp_path / "task.sh"
+    script.write_text("export GPU_COUNT=1\n")
+
+    with pytest.raises(ValueError, match="Command GPU_COUNT"):
+        parse_gpu_count(f"GPU_COUNT=abc bash {script}")
+
+
 def test_parse_submission_command_accepts_env_prefixed_bash_script(tmp_path):
     script = tmp_path / "task.sh"
     script.write_text("export GPU_COUNT=1\n")

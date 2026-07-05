@@ -5,7 +5,7 @@ GPUDock is a local scheduler for GPU-backed bash scripts. It keeps the simple qu
 ## Goals
 
 - Accept only absolute `.sh` script paths, optionally prefixed with environment assignments.
-- Parse `GPU_COUNT` from each script.
+- Parse `GPU_COUNT` from each submitted command first, then from the script.
 - Launch tasks only on GPUs that stay below 1% memory usage for 120 seconds.
 - Inject `CUDA_DEVICES` and override `GPU_COUNT` at launch time.
 - Preserve serial and parallel queue modes.
@@ -33,7 +33,8 @@ Submissions are rejected unless `command` is:
 
 - an absolute `.sh` file path; or
 - optional `KEY=value` assignments followed by optional `bash` and an absolute `.sh` file path; and
-- a script containing `GPU_COUNT=<positive integer>` or `export GPU_COUNT=<positive integer>`.
+- either a submitted `GPU_COUNT=<positive integer>` assignment or a script containing
+  `GPU_COUNT=<positive integer>` or `export GPU_COUNT=<positive integer>`.
 
 This intentionally rejects arbitrary shell strings.
 
@@ -41,7 +42,7 @@ Accepted examples:
 
 ```bash
 /absolute/path/to/train.sh
-DATA_PATH=/home/data.json bash /absolute/path/to/train.sh
+GPU_COUNT=2 DATA_PATH=/home/data.json bash /absolute/path/to/train.sh
 MODEL=llama DATA_PATH=/home/data.json /absolute/path/to/train.sh
 ```
 
@@ -90,6 +91,10 @@ Environment assignments submitted before the script are passed into the subproce
 environment. GPUDock still launches the parsed script path directly with `bash`;
 it does not run the submitted text through a shell.
 
+If the submitted command includes `GPU_COUNT=<n>`, that value is used for scheduling
+and for the launched subprocess environment. If it is omitted, GPUDock reads the
+script's last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment.
+
 It injects:
 
 ```text
@@ -97,8 +102,8 @@ CUDA_DEVICES=<selected ids>
 GPU_COUNT=<number of selected ids>
 ```
 
-This overrides any submitted or parent `CUDA_DEVICES` and `GPU_COUNT` value. The
-script's own `GPU_COUNT` assignment is still the source of the requested GPU count.
+This overrides any submitted or parent `CUDA_DEVICES` value. `GPU_COUNT` comes from
+the submitted command when present, otherwise from the script.
 
 ## Email
 

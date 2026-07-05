@@ -125,14 +125,27 @@ def parse_submission_command(command: str) -> ParsedCommand:
 
 def parse_gpu_count(command: str) -> int:
     parsed = parse_submission_command(command)
+    if "GPU_COUNT" in parsed.env_overrides:
+        return _parse_positive_gpu_count(
+            parsed.env_overrides["GPU_COUNT"],
+            "Command GPU_COUNT",
+        )
+
     path = parsed.script_path
     content = path.read_text(errors="replace")
     matches = list(GPU_COUNT_PATTERN.finditer(content))
     if not matches:
         raise ValueError("Bash script must define GPU_COUNT, for example: export GPU_COUNT=1")
-    gpu_count = int(matches[-1].group("count"))
+    return _parse_positive_gpu_count(matches[-1].group("count"), "GPU_COUNT")
+
+
+def _parse_positive_gpu_count(value: str, source: str) -> int:
+    try:
+        gpu_count = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{source} must be a positive integer.") from exc
     if gpu_count <= 0:
-        raise ValueError("GPU_COUNT must be greater than 0.")
+        raise ValueError(f"{source} must be greater than 0.")
     return gpu_count
 
 
