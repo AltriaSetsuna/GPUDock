@@ -20,7 +20,7 @@ It is designed for a shared single-machine GPU server: simple enough to run loca
 ## Quick Start
 
 ```bash
-git clone https://github.com/your-name/gpudock.git
+git@github.com:AltriaSetsuna/GPUDock.git
 cd gpudock
 python -m venv .venv
 source .venv/bin/activate
