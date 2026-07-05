@@ -22,10 +22,10 @@ It is designed for a shared single-machine GPU server: simple enough to run loca
 
 ```bash
 git clone https://github.com/AltriaSetsuna/GPUDock.git
-cd gpudock
-python -m venv .venv
+cd GPUDock
+uv venv
 source .venv/bin/activate
-uv pip install -e ".[dev]"
+uv sync
 gpudock serve
 ```
 
