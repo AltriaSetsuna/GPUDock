@@ -7,6 +7,7 @@ GPUDock is a local scheduler for GPU-backed bash scripts. It keeps the simple qu
 - Accept only absolute `.sh` script paths, optionally prefixed with environment assignments.
 - Parse `GPU_COUNT` from each submitted command first, then from the script.
 - Launch tasks only on GPUs that stay below 1% memory usage for 120 seconds.
+- Reserve assigned GPUs locally until the owning task exits.
 - Inject `CUDA_DEVICES` and override `GPU_COUNT` at launch time.
 - Preserve serial and parallel queue modes.
 - Requeue tasks that cannot currently acquire enough idle GPUs.
@@ -79,6 +80,12 @@ If a task needs `GPU_COUNT=n`, GPUDock selects the first `n` stable-idle GPU IDs
 exit_status = waiting_for_gpu
 ```
 
+Selection and reservation happen together under a process-local lock. This matters
+for parallel tasks: during model startup, a process may not have allocated visible
+GPU memory yet, so a second runner could otherwise observe the same GPU as idle
+and start another large task on it. GPUDock keeps selected GPU IDs reserved until
+the task exits or launch fails.
+
 ## Launch
 
 GPUDock launches scripts with:
@@ -124,6 +131,9 @@ The serial worker claims one pending `serial` task at a time. If there are not e
 ### Parallel Dispatcher
 
 The parallel dispatcher claims pending `parallel` tasks and starts a runner thread for each task. Each runner independently checks GPU availability immediately before launch. If insufficient GPUs are available, that task is returned to `pending`.
+
+Because GPU IDs are reserved locally when selected, concurrently launched parallel
+tasks cannot receive the same GPU from the same GPUDock process.
 
 ## Visual Dashboard
 

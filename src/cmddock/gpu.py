@@ -24,6 +24,12 @@ class ParsedCommand:
 
 
 @dataclass(frozen=True)
+class GPUReservation:
+    selected_gpu_ids: list[int]
+    idle_gpu_ids: list[int]
+
+
+@dataclass(frozen=True)
 class GPUStatus:
     gpu_id: int
     memory_used_mb: float
@@ -73,6 +79,55 @@ class StableIdleGPUTracker:
 
 
 DEFAULT_IDLE_TRACKER = StableIdleGPUTracker()
+
+
+class GPUReservationManager:
+    def __init__(self, tracker: StableIdleGPUTracker = DEFAULT_IDLE_TRACKER) -> None:
+        self._tracker = tracker
+        self._reserved_gpu_ids: set[int] = set()
+        self._lock = threading.Lock()
+
+    def reserve(
+        self,
+        gpu_count: int,
+        threshold: float = IDLE_MEMORY_THRESHOLD,
+        stability_seconds: float = IDLE_STABILITY_SECONDS,
+    ) -> GPUReservation:
+        statuses = get_gpu_memory_status()
+        with self._lock:
+            idle_gpu_ids = self._tracker.get_idle_gpu_ids(
+                statuses,
+                threshold,
+                stability_seconds,
+            )
+            available_gpu_ids = [
+                gpu_id for gpu_id in idle_gpu_ids if gpu_id not in self._reserved_gpu_ids
+            ]
+            if len(available_gpu_ids) < gpu_count:
+                threshold_percent = threshold * 100
+                stability_display = f"{stability_seconds:g}"
+                raise GPUSchedulingError(
+                    f"Need {gpu_count} idle GPU(s), but only {len(available_gpu_ids)} "
+                    "GPU(s) are stable-idle and not reserved by GPUDock. "
+                    f"{len(idle_gpu_ids)} GPU(s) have stayed below "
+                    f"{threshold_percent:g}% memory usage for {stability_display} "
+                    "second(s)."
+                )
+            selected_gpu_ids = available_gpu_ids[:gpu_count]
+            self._reserved_gpu_ids.update(selected_gpu_ids)
+            return GPUReservation(selected_gpu_ids, idle_gpu_ids)
+
+    def release(self, gpu_ids: list[int]) -> None:
+        with self._lock:
+            for gpu_id in gpu_ids:
+                self._reserved_gpu_ids.discard(gpu_id)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._reserved_gpu_ids.clear()
+
+
+DEFAULT_RESERVATION_MANAGER = GPUReservationManager()
 
 
 def validate_script_path(script_path: str) -> Path:
@@ -198,3 +253,19 @@ def select_idle_gpus(
             f"{stability_display} second(s)."
         )
     return idle_gpu_ids[:gpu_count], idle_gpu_ids
+
+
+def reserve_idle_gpus(
+    gpu_count: int,
+    threshold: float = IDLE_MEMORY_THRESHOLD,
+    stability_seconds: float = IDLE_STABILITY_SECONDS,
+    manager: GPUReservationManager = DEFAULT_RESERVATION_MANAGER,
+) -> GPUReservation:
+    return manager.reserve(gpu_count, threshold, stability_seconds)
+
+
+def release_reserved_gpus(
+    gpu_ids: list[int],
+    manager: GPUReservationManager = DEFAULT_RESERVATION_MANAGER,
+) -> None:
+    manager.release(gpu_ids)

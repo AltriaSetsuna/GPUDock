@@ -9,6 +9,7 @@ It is designed for a shared single-machine GPU server: simple enough to run loca
 - Accept only absolute `.sh` bash script paths, with optional `KEY=value` prefixes.
 - Read `GPU_COUNT` from the submitted command first, then from the script.
 - Use only GPUs whose memory usage stays below 1% for 120 seconds.
+- Reserve selected GPUs inside GPUDock until each launched task finishes.
 - Override the launched script environment with `CUDA_DEVICES=<ids>` and `GPU_COUNT=<n>`.
 - Execute `serial` tasks one at a time.
 - Execute `parallel` tasks by dispatching all pending parallel work.
@@ -96,17 +97,22 @@ A GPU is eligible only when it has stayed below the threshold for 120 continuous
 memory.used / memory.total < 0.01
 ```
 
+When GPUDock assigns GPUs to a task, those GPU IDs are reserved in the scheduler
+process until that task exits. Parallel tasks therefore cannot all observe the same
+briefly idle GPU during model startup and launch onto it at the same time.
+
 When a pending task is claimed:
 
 1. GPUDock validates that `command` is either an absolute `.sh` path or optional
    `KEY=value` assignments followed by `bash /absolute/path/to/script.sh`.
 2. GPUDock uses submitted `GPU_COUNT=<n>` first; if omitted, it parses the script's
    last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment.
-3. GPUDock checks for at least `n` GPUs that stayed below 1% memory usage for 120 seconds.
-4. If enough GPUs are available, it launches the script with `bash`.
+3. GPUDock checks for at least `n` unreserved GPUs that stayed below 1% memory usage for 120 seconds.
+4. If enough GPUs are available, it reserves them and launches the script with `bash`.
 5. It injects `CUDA_DEVICES` and overrides `GPU_COUNT`.
 6. It sends a startup email after the process starts.
-7. If GPUs are insufficient, the task returns to `pending`.
+7. When the task exits or fails to launch, GPUDock releases the reservation.
+8. If GPUs are insufficient, the task returns to `pending`.
 
 ## HTTP API
 

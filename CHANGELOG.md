@@ -13,6 +13,7 @@
 - Changed GPU idleness from an instant sample to a 120-second stable low-memory window.
 - Accepted env-prefixed bash launch commands such as `DATA_PATH=/x bash /train.sh`.
 - Made submitted `GPU_COUNT=<n>` override script-level `GPU_COUNT` parsing.
+- Added process-local GPU reservations to prevent parallel launches from sharing one GPU.
 
 ## 0.2.0
 

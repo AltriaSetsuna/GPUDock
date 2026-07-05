@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from cmddock.database import Database
+from cmddock.gpu import GPUReservation
 from cmddock.models import CommandStatus, QueueMode
 from cmddock.worker import CommandRunner, CommandWorker, ParallelDispatcher
 
@@ -32,7 +33,11 @@ def _write_script(tmp_path, name: str, body: str):
 def test_serial_worker_and_parallel_dispatcher_process_isolated_queues(tmp_path, monkeypatch):
     database = Database(tmp_path / "cmddock.db")
     logs_dir = tmp_path / "logs"
-    monkeypatch.setattr("cmddock.worker.select_idle_gpus", lambda gpu_count: ([0], [0, 1, 2]))
+    monkeypatch.setattr(
+        "cmddock.worker.reserve_idle_gpus",
+        lambda gpu_count: GPUReservation([0], [0, 1, 2]),
+    )
+    monkeypatch.setattr("cmddock.worker.release_reserved_gpus", lambda gpu_ids: None)
     monkeypatch.setattr("cmddock.worker.send_launch_email_async", lambda **kwargs: None)
 
     serial_script = _write_script(tmp_path, "serial.sh", "printf serial")
@@ -73,7 +78,11 @@ def test_serial_worker_and_parallel_dispatcher_process_isolated_queues(tmp_path,
 def test_command_runner_passes_submission_env_overrides(tmp_path, monkeypatch):
     database = Database(tmp_path / "cmddock.db")
     logs_dir = tmp_path / "logs"
-    monkeypatch.setattr("cmddock.worker.select_idle_gpus", lambda gpu_count: ([3], [3, 4]))
+    monkeypatch.setattr(
+        "cmddock.worker.reserve_idle_gpus",
+        lambda gpu_count: GPUReservation([3], [3, 4]),
+    )
+    monkeypatch.setattr("cmddock.worker.release_reserved_gpus", lambda gpu_ids: None)
     monkeypatch.setattr("cmddock.worker.send_launch_email_async", lambda **kwargs: None)
 
     script = _write_script(

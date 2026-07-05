@@ -11,7 +11,8 @@ from cmddock.gpu import (
     GPUSchedulingError,
     parse_gpu_count,
     parse_submission_command,
-    select_idle_gpus,
+    release_reserved_gpus,
+    reserve_idle_gpus,
 )
 from cmddock.models import QueueMode
 from cmddock.runner import run_command
@@ -36,7 +37,7 @@ class CommandRunner:
             script_path = str(parsed.script_path)
             gpu_count = parse_gpu_count(command_text)
             self.database.set_gpu_requirement(command_id, gpu_count)
-            selected_gpus, idle_gpus = select_idle_gpus(gpu_count)
+            reservation = reserve_idle_gpus(gpu_count)
         except GPUSchedulingError as exc:
             self.database.requeue_waiting_for_gpu(command_id, str(exc))
             return False
@@ -45,6 +46,8 @@ class CommandRunner:
             self.database.mark_error(command_id, None, "validation_error", str(exc))
             return True
 
+        selected_gpus = reservation.selected_gpu_ids
+        idle_gpus = reservation.idle_gpu_ids
         cuda_devices = ",".join(str(gpu_id) for gpu_id in selected_gpus)
         env = os.environ.copy()
         env.update(parsed.env_overrides)
@@ -71,6 +74,8 @@ class CommandRunner:
             logger.exception("Command %s failed before subprocess completion", command_id)
             self.database.mark_error(command_id, None, "runner_exception", str(exc))
             return True
+        finally:
+            release_reserved_gpus(selected_gpus)
 
         if result.exit_code == 0:
             self.database.mark_succeeded(command_id, result.exit_code)

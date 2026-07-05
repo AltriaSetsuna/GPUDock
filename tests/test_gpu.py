@@ -3,11 +3,14 @@ from __future__ import annotations
 import pytest
 
 from cmddock.gpu import (
+    GPUReservationManager,
     GPUSchedulingError,
     GPUStatus,
     StableIdleGPUTracker,
     parse_gpu_count,
     parse_submission_command,
+    release_reserved_gpus,
+    reserve_idle_gpus,
     select_idle_gpus,
     validate_script_path,
 )
@@ -136,3 +139,38 @@ def test_stable_idle_tracker_resets_when_gpu_memory_rises():
 
     now[0] = 360.0
     assert tracker.get_idle_gpu_ids(low_memory) == [0]
+
+
+def test_reservation_manager_skips_already_reserved_gpus(monkeypatch):
+    now = [0.0]
+    tracker = StableIdleGPUTracker(clock=lambda: now[0])
+    manager = GPUReservationManager(tracker=tracker)
+    monkeypatch.setattr(
+        "cmddock.gpu.get_gpu_memory_status",
+        lambda: [
+            GPUStatus(gpu_id=0, memory_used_mb=0, memory_total_mb=1000),
+            GPUStatus(gpu_id=1, memory_used_mb=0, memory_total_mb=1000),
+        ],
+    )
+
+    tracker.get_idle_gpu_ids(
+        [
+            GPUStatus(gpu_id=0, memory_used_mb=0, memory_total_mb=1000),
+            GPUStatus(gpu_id=1, memory_used_mb=0, memory_total_mb=1000),
+        ]
+    )
+    now[0] = 120.0
+
+    first = reserve_idle_gpus(1, manager=manager)
+    second = reserve_idle_gpus(1, manager=manager)
+
+    assert first.selected_gpu_ids == [0]
+    assert second.selected_gpu_ids == [1]
+
+    with pytest.raises(GPUSchedulingError, match="reserved"):
+        reserve_idle_gpus(1, manager=manager)
+
+    release_reserved_gpus(first.selected_gpu_ids, manager=manager)
+    third = reserve_idle_gpus(1, manager=manager)
+
+    assert third.selected_gpu_ids == [0]
