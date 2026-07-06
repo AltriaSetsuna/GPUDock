@@ -653,7 +653,8 @@ def render_index() -> str:
       document.querySelector("#detail-description").textContent =
         `${state}${group.description ? ` - ${group.description}` : ""}`;
       document.querySelector("#start-group-button").disabled = !(
-        group.execution_state === "draft" && group.pending_count > 0
+        (group.execution_state === "draft" || group.execution_state === "paused")
+        && group.pending_count > 0
       );
       document.querySelector("#pause-group-button").disabled = group.execution_state !== "running";
       const submitButton = submitForm.querySelector("button[type='submit']");

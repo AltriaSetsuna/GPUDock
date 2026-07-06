@@ -21,3 +21,4 @@ def test_group_detail_warns_when_group_is_not_schedulable() -> None:
     assert 'id="schedule-warning"' in html
     assert "This task group has not been started. Commands will not be scheduled." in html
     assert "This task group is paused. Pending commands will not be scheduled." in html
+    assert 'group.execution_state === "draft" || group.execution_state === "paused"' in html
