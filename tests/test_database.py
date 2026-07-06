@@ -93,7 +93,7 @@ def test_nonzero_exit_moves_to_error_and_blocks_group(tmp_path):
     assert group["status"] == GroupStatus.BLOCKED
 
 
-def test_killed_command_requeues_ahead_of_other_group_commands(tmp_path):
+def test_killed_command_requeues_ahead_and_pauses_group(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     first = database.create_command("sleep 10", None)
     second = database.create_command("echo second", None)
@@ -103,11 +103,19 @@ def test_killed_command_requeues_ahead_of_other_group_commands(tmp_path):
     assert claimed["id"] == first["id"]
 
     database.requeue_killed(first["id"], -9, "killed_by_signal:SIGKILL")
+    group = database.get_task_group(first["group_id"])
+    blocked_claim = database.claim_next_pending_command()
+
+    assert group["execution_state"] == GroupExecutionState.PAUSED
+    assert group["status"] == GroupStatus.PAUSED
+    assert blocked_claim is None
+    pending_ids = [record["id"] for record in database.list_commands(CommandStatus.PENDING)]
+    assert second["id"] in pending_ids
+
+    database.start_task_group(first["group_id"])
     next_claimed = database.claim_next_pending_command()
 
     assert next_claimed["id"] == first["id"]
-    pending_ids = [record["id"] for record in database.list_commands(CommandStatus.PENDING)]
-    assert second["id"] in pending_ids
 
 
 def test_running_pid_is_recorded_and_cleared_on_finish(tmp_path):

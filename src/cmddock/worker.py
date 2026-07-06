@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from cmddock.database import Database
 from cmddock.emailer import send_launch_email_async
 from cmddock.gpu import (
+    GPUReservation,
     GPUSchedulingError,
     parse_gpu_count,
     parse_submission_command,
@@ -16,8 +18,19 @@ from cmddock.gpu import (
 )
 from cmddock.models import CommandStatus
 from cmddock.runner import start_command_process, wait_for_process
+from cmddock.scheduling import normalize_min_idle_seconds
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PreparedCommand:
+    command: dict
+    script_path: str
+    stdout_path: Path
+    stderr_path: Path
+    env: dict[str, str]
+    reservation: GPUReservation | None
 
 
 class CommandRunner:
@@ -26,6 +39,12 @@ class CommandRunner:
         self.logs_dir = logs_dir
 
     def run_one(self, command: dict) -> bool:
+        prepared = self.prepare(command)
+        if prepared is None:
+            return False
+        return self.run_prepared(prepared)
+
+    def prepare(self, command: dict) -> PreparedCommand | None:
         command_id = command["id"]
         command_text = command["command"]
         stdout_path = self.logs_dir / f"{command_id}.stdout.log"
@@ -37,43 +56,64 @@ class CommandRunner:
             script_path = str(parsed.script_path)
             gpu_count = parse_gpu_count(command_text)
             self.database.set_gpu_requirement(command_id, gpu_count)
-            reservation = reserve_idle_gpus(gpu_count)
+            min_idle_seconds = normalize_min_idle_seconds(command.get("min_idle_seconds"))
+            reservation = (
+                reserve_idle_gpus(gpu_count, stability_seconds=min_idle_seconds)
+                if gpu_count is not None
+                else None
+            )
         except GPUSchedulingError as exc:
             self.database.requeue_waiting_for_gpu(command_id, str(exc))
-            return False
+            return None
         except Exception as exc:  # noqa: BLE001 - invalid scripts belong in the error state.
             logger.exception("Command %s failed validation before launch", command_id)
             self.database.mark_error(command_id, None, "validation_error", str(exc))
-            return True
+            return None
 
-        selected_gpus = reservation.selected_gpu_ids
+        env = os.environ.copy()
+        env.update(parsed.env_overrides)
+        if reservation is not None and gpu_count is not None:
+            selected_gpus = reservation.selected_gpu_ids
+            cuda_devices = ",".join(str(gpu_id) for gpu_id in selected_gpus)
+            env["CUDA_DEVICES"] = cuda_devices
+            env["GPU_COUNT"] = str(gpu_count)
+        return PreparedCommand(
+            command=command,
+            script_path=script_path,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            env=env,
+            reservation=reservation,
+        )
+
+    def run_prepared(self, prepared: PreparedCommand) -> bool:
+        command = prepared.command
+        command_id = command["id"]
+        reservation = prepared.reservation
+        selected_gpus = reservation.selected_gpu_ids if reservation is not None else []
         try:
             current = self.database.get_command(command_id)
             if current["status"] != CommandStatus.RUNNING:
                 return True
 
-            idle_gpus = reservation.idle_gpu_ids
-            cuda_devices = ",".join(str(gpu_id) for gpu_id in selected_gpus)
-            env = os.environ.copy()
-            env.update(parsed.env_overrides)
-            env["CUDA_DEVICES"] = cuda_devices
-            env["GPU_COUNT"] = str(gpu_count)
+            idle_gpus = reservation.idle_gpu_ids if reservation is not None else []
+            assigned_gpu_ids = ",".join(str(gpu_id) for gpu_id in selected_gpus) or None
             process = self.database.start_process_if_running(
                 command_id,
-                cuda_devices,
+                assigned_gpu_ids,
                 lambda: start_command_process(
-                    script_path,
+                    prepared.script_path,
                     command["cwd"],
-                    stdout_path,
-                    stderr_path,
-                    env=env,
+                    prepared.stdout_path,
+                    prepared.stderr_path,
+                    env=prepared.env,
                 ),
             )
             if process is None:
                 return True
 
             send_launch_email_async(
-                script_path=script_path,
+                script_path=prepared.script_path,
                 selected_gpus=selected_gpus,
                 idle_gpus=idle_gpus,
                 command_id=command_id,
@@ -84,7 +124,8 @@ class CommandRunner:
             self.database.mark_error(command_id, None, "runner_exception", str(exc))
             return True
         finally:
-            release_reserved_gpus(selected_gpus)
+            if selected_gpus:
+                release_reserved_gpus(selected_gpus)
 
         if result.exit_code == 0:
             self.database.mark_succeeded(command_id, result.exit_code)
@@ -143,30 +184,37 @@ class GroupScheduler:
     def run_forever(self) -> None:
         while not self._stop_event.is_set():
             dispatched = False
+            skipped_group_ids: set[int] = set()
             while not self._stop_event.is_set():
-                command = self.database.claim_next_pending_command()
+                command = self.database.claim_next_pending_command(
+                    excluded_group_ids=skipped_group_ids,
+                )
                 if command is None:
                     break
+                prepared = self.runner.prepare(command)
+                if prepared is None:
+                    skipped_group_ids.add(command["group_id"])
+                    continue
                 dispatched = True
-                self._start_command_thread(command)
+                self._start_command_thread(prepared)
             if not dispatched:
                 with self._condition:
                     self._condition.wait(timeout=self.poll_interval_seconds)
 
-    def _start_command_thread(self, command: dict) -> None:
+    def _start_command_thread(self, prepared: PreparedCommand) -> None:
         thread = threading.Thread(
             target=self._run_and_forget,
-            args=(command,),
-            name=f"gpudock-command-{command['id']}",
+            args=(prepared,),
+            name=f"gpudock-command-{prepared.command['id']}",
             daemon=True,
         )
         with self._running_lock:
             self._running_threads.add(thread)
         thread.start()
 
-    def _run_and_forget(self, command: dict) -> None:
+    def _run_and_forget(self, prepared: PreparedCommand) -> None:
         try:
-            self.runner.run_one(command)
+            self.runner.run_prepared(prepared)
         finally:
             current_thread = threading.current_thread()
             with self._running_lock:

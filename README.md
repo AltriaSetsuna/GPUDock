@@ -1,6 +1,6 @@
 # GPUDock
 
-GPUDock is a local GPU script scheduler for shared single-machine GPU servers. It accepts validated bash script launches, waits until enough GPUs have stayed below 1% memory usage for 120 seconds, injects `CUDA_DEVICES` and `GPU_COUNT`, and runs tasks through task groups.
+GPUDock is a local GPU script scheduler for shared single-machine GPU servers. It accepts validated bash script launches, waits until enough GPUs have stayed below 1% memory usage for the task's required idle window when a task declares `GPU_COUNT`, injects `CUDA_DEVICES` and `GPU_COUNT` for GPU tasks, and runs tasks through task groups.
 
 The scheduling model is intentionally simple:
 
@@ -13,10 +13,11 @@ The scheduling model is intentionally simple:
 ## Features
 
 - Accept only absolute `.sh` bash script paths, with optional `KEY=value` prefixes.
-- Read `GPU_COUNT` from the submitted command first, then from the script.
-- Use only GPUs whose memory usage stays below 1% for 120 seconds.
+- Read optional `GPU_COUNT` from the submitted command first, then from the script.
+- Run commands without `GPU_COUNT` as ordinary non-GPU tasks.
+- Use only GPUs whose memory usage stays below 1% for each task's `min_idle_seconds`.
 - Reserve selected GPUs inside GPUDock until each launched task finishes.
-- Override the launched script environment with `CUDA_DEVICES=<ids>` and `GPU_COUNT=<n>`.
+- Override the launched script environment with `CUDA_DEVICES=<ids>` and `GPU_COUNT=<n>` for GPU tasks.
 - Keep new task groups in a draft state until the user explicitly starts them.
 - Reorder pending commands inside a draft group; topmost commands run first.
 - Run each task group serially while scheduling different groups in parallel.
@@ -63,7 +64,7 @@ The CLI remains available for automation:
 ```bash
 gpudock create-group qwen-sweep --description "Qwen evaluation sweep"
 gpudock add /absolute/path/to/train.sh --group qwen-sweep
-gpudock add 'GPU_COUNT=2 DATA_PATH=/home/data.json bash /absolute/path/to/train.sh' --group qwen-sweep
+gpudock add 'GPU_COUNT=2 DATA_PATH=/home/data.json bash /absolute/path/to/train.sh' --group qwen-sweep --min-idle-seconds 300
 gpudock reorder-group 1 2 1
 gpudock start-group 1
 gpudock groups
@@ -83,7 +84,8 @@ The dashboard lets you:
 - create task groups;
 - inspect group status, counts, current command, and latest activity;
 - open a draft group to submit absolute `.sh` script paths or env-prefixed bash launch commands;
-- move pending commands up or down before launch; the first row runs first;
+- view queued/running/error tasks separately from succeeded/canceled history;
+- move pending commands up or down before launch; active queue order starts at 1 and excludes succeeded/canceled tasks;
 - start a prepared task group only after its commands and order are final;
 - pause a running task group so no later pending command is claimed;
 - view stdout/stderr logs;
@@ -104,7 +106,9 @@ GPUDock polls GPU memory with:
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits
 ```
 
-A GPU is eligible only when it has stayed below the threshold for 120 continuous seconds:
+A GPU is eligible only when it has stayed below the threshold for the task's required
+continuous idle window. The default is 120 seconds, and each task may set
+`min_idle_seconds` between `0` and `86400` seconds:
 
 ```text
 memory.used / memory.total < 0.01
@@ -118,12 +122,15 @@ When the scheduler looks for work:
 2. It skips groups with a running command.
 3. It skips groups blocked by an error command.
 4. It takes only the top pending command from each runnable group.
-5. It checks for enough unreserved GPUs that stayed below 1% memory usage for 120 seconds.
-6. If enough GPUs are available, it reserves them and launches the script with `bash`.
-7. It injects `CUDA_DEVICES` and overrides `GPU_COUNT`.
-8. It sends a startup email after the process starts.
-9. When the task exits, is killed, or fails to launch, GPUDock releases the reservation.
-10. If GPUs are insufficient, the task returns to `pending`.
+5. If the command declares `GPU_COUNT`, it checks for enough unreserved GPUs that stayed below 1% memory usage for that task's `min_idle_seconds`.
+6. If that group does not have enough GPUs, the task returns to `pending` with `waiting_for_gpu`, and GPUDock keeps scanning later task groups in the same scheduler pass.
+7. If the command does not declare `GPU_COUNT`, it is treated as an ordinary non-GPU task and launches without GPU reservation.
+8. It launches the script with `bash`.
+9. For GPU tasks, it injects `CUDA_DEVICES` and overrides `GPU_COUNT`.
+10. It sends a startup email after the process starts.
+11. When the task exits, is killed, or fails to launch, GPUDock releases the reservation.
+
+This is work-conserving: if group `B` needs more GPUs than are currently available but group `C` can run, GPUDock skips `B` for that pass and starts `C` instead of leaving GPUs idle.
 
 ## HTTP API
 
@@ -149,6 +156,14 @@ With environment variables:
 curl -X POST http://127.0.0.1:8765/commands \
   -H 'content-type: application/json' \
   -d '{"group_name": "qwen-sweep", "command": "GPU_COUNT=2 DATA_PATH=/home/data.json bash /absolute/path/to/train.sh"}'
+```
+
+With a longer idle window:
+
+```bash
+curl -X POST http://127.0.0.1:8765/commands \
+  -H 'content-type: application/json' \
+  -d '{"group_name": "qwen-sweep", "command": "GPU_COUNT=2 bash /absolute/path/to/train.sh", "min_idle_seconds": 300}'
 ```
 
 ### Arrange and start a task group
@@ -224,7 +239,7 @@ running group -> paused group
 pending -> running -> succeeded
 pending -> running -> error
 pending -> canceled
-running -> killed -> pending
+running -> killed -> pending + paused group
 running -> canceled_before_launch -> canceled
 running -> waiting_for_gpu -> pending
 ```
@@ -239,9 +254,10 @@ Important behavior:
 - Pending commands can be canceled.
 - Running commands can be killed with `gpudock kill <id>`.
 - Killed launched commands receive `SIGTERM` as a process group, followed by `SIGKILL` if needed, so child processes started by the bash script are targeted too.
-- Killed launched commands return to `pending` and run next within their task group.
+- Killed launched commands return to `pending`, keep priority within their task group, and pause the whole task group so they are not immediately rescheduled.
 - Running commands that have not launched a subprocess yet can be killed; they are marked `canceled` with `exit_status = canceled_before_launch`.
 - Insufficient stable-idle GPUs return commands to `pending` with `exit_status = waiting_for_gpu`.
+- GPU tasks use `min_idle_seconds` as their required continuous idle window; default `120`, max `86400`.
 
 ## Development
 

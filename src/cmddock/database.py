@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cmddock.models import CommandStatus, GroupExecutionState, GroupStatus
+from cmddock.scheduling import DEFAULT_MIN_IDLE_SECONDS, normalize_min_idle_seconds
 
 DEFAULT_GROUP_NAME = "default"
 
@@ -65,6 +66,7 @@ class Database:
                     exit_status TEXT,
                     pid INTEGER,
                     gpu_count INTEGER,
+                    min_idle_seconds INTEGER NOT NULL DEFAULT 120,
                     assigned_gpu_ids TEXT,
                     stdout_path TEXT,
                     stderr_path TEXT,
@@ -84,6 +86,12 @@ class Database:
             self._ensure_column(conn, "commands", "position", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "commands", "pid", "INTEGER")
             self._ensure_column(conn, "commands", "gpu_count", "INTEGER")
+            self._ensure_column(
+                conn,
+                "commands",
+                "min_idle_seconds",
+                f"INTEGER NOT NULL DEFAULT {DEFAULT_MIN_IDLE_SECONDS}",
+            )
             self._ensure_column(conn, "commands", "assigned_gpu_ids", "TEXT")
             default_group_id = self._ensure_group(conn, DEFAULT_GROUP_NAME, "Default task group.")
             conn.execute(
@@ -296,8 +304,10 @@ class Database:
         group_id: int | None = None,
         gpu_count: int | None = None,
         group_name: str | None = None,
+        min_idle_seconds: int | None = DEFAULT_MIN_IDLE_SECONDS,
     ) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
+            normalized_min_idle_seconds = normalize_min_idle_seconds(min_idle_seconds)
             if group_id is not None and group_name is not None:
                 raise ValueError("Use either group_id or group_name, not both.")
             if group_id is None:
@@ -317,9 +327,10 @@ class Database:
             cur = conn.execute(
                 """
                 INSERT INTO commands (
-                    group_id, position, command, cwd, status, submitted_at, gpu_count, run_after_id
+                    group_id, position, command, cwd, status, submitted_at, gpu_count,
+                    min_idle_seconds, run_after_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     group_id,
@@ -329,6 +340,7 @@ class Database:
                     CommandStatus.PENDING,
                     submitted_at,
                     gpu_count,
+                    normalized_min_idle_seconds,
                 ),
             )
             return self.get_command(cur.lastrowid, conn=conn)
@@ -515,16 +527,26 @@ class Database:
             )
             return self.get_command(command_id, conn=conn)
 
-    def claim_next_pending_command(self) -> dict[str, Any] | None:
+    def claim_next_pending_command(
+        self,
+        excluded_group_ids: set[int] | None = None,
+    ) -> dict[str, Any] | None:
         with self._lock, self.connect() as conn:
+            excluded_group_ids = excluded_group_ids or set()
+            excluded_values = sorted(excluded_group_ids)
+            excluded_clause = ""
+            if excluded_values:
+                placeholders = ", ".join("?" for _ in excluded_values)
+                excluded_clause = f"AND c.group_id NOT IN ({placeholders})"
             row = conn.execute(
-                """
+                f"""
                 SELECT c.*
                 FROM commands c
                 JOIN task_groups g ON g.id = c.group_id
                 WHERE c.status = ?
                   AND g.archived_at IS NULL
                   AND g.execution_state = ?
+                  {excluded_clause}
                   AND NOT EXISTS (
                       SELECT 1
                       FROM commands running
@@ -557,13 +579,14 @@ class Database:
                     c.id ASC
                 LIMIT 1
                 """,
-                (
+                [
                     CommandStatus.PENDING,
                     GroupExecutionState.RUNNING,
+                    *excluded_values,
                     CommandStatus.RUNNING,
                     CommandStatus.ERROR,
                     CommandStatus.PENDING,
-                ),
+                ],
             ).fetchone()
             if row is None:
                 return None
@@ -601,6 +624,7 @@ class Database:
 
     def requeue_killed(self, command_id: int, exit_code: int, exit_status: str) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
+            existing = self.get_command(command_id, conn=conn)
             conn.execute(
                 """
                 UPDATE commands
@@ -621,6 +645,19 @@ class Database:
                     exit_status,
                     command_id,
                     command_id,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE task_groups
+                SET execution_state = ?
+                WHERE id = ?
+                  AND execution_state = ?
+                """,
+                (
+                    GroupExecutionState.PAUSED,
+                    existing["group_id"],
+                    GroupExecutionState.RUNNING,
                 ),
             )
             return self.get_command(command_id, conn=conn)
@@ -659,7 +696,7 @@ class Database:
                 (pid, command_id, CommandStatus.RUNNING),
             )
 
-    def set_gpu_requirement(self, command_id: int, gpu_count: int) -> None:
+    def set_gpu_requirement(self, command_id: int, gpu_count: int | None) -> None:
         with self._lock, self.connect() as conn:
             conn.execute(
                 "UPDATE commands SET gpu_count = ? WHERE id = ?",
@@ -676,7 +713,7 @@ class Database:
     def start_process_if_running(
         self,
         command_id: int,
-        assigned_gpu_ids: str,
+        assigned_gpu_ids: str | None,
         launch_process: Callable[[], Any],
     ) -> Any | None:
         with self._lock, self.connect() as conn:
@@ -815,6 +852,7 @@ class Database:
             "exit_status": row["exit_status"],
             "pid": row["pid"],
             "gpu_count": row["gpu_count"],
+            "min_idle_seconds": row["min_idle_seconds"],
             "assigned_gpu_ids": row["assigned_gpu_ids"],
             "stdout_path": row["stdout_path"],
             "stderr_path": row["stderr_path"],

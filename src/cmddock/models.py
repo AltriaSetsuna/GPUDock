@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from cmddock.scheduling import DEFAULT_MIN_IDLE_SECONDS, MAX_MIN_IDLE_SECONDS
+
 
 class CommandStatus(StrEnum):
     PENDING = "pending"
@@ -64,6 +66,11 @@ class CommandCreate(BaseModel):
     cwd: str | None = None
     group_id: int | None = None
     group_name: str | None = None
+    min_idle_seconds: int = Field(
+        default=DEFAULT_MIN_IDLE_SECONDS,
+        ge=0,
+        le=MAX_MIN_IDLE_SECONDS,
+    )
 
 
 class CommandOrderUpdate(BaseModel):
@@ -85,6 +92,7 @@ class CommandRecord(BaseModel):
     exit_status: str | None
     pid: int | None
     gpu_count: int | None
+    min_idle_seconds: int
     assigned_gpu_ids: str | None
     stdout_path: str | None
     stderr_path: str | None

@@ -84,12 +84,11 @@ def test_parse_submission_command_rejects_extra_script_arguments(tmp_path):
         parse_submission_command(f"DATA_PATH=/home/data.json bash {script} --epochs 3")
 
 
-def test_parse_gpu_count_requires_definition(tmp_path):
+def test_parse_gpu_count_treats_missing_definition_as_non_gpu_task(tmp_path):
     script = tmp_path / "task.sh"
     script.write_text("echo missing\n")
 
-    with pytest.raises(ValueError, match="GPU_COUNT"):
-        parse_gpu_count(str(script))
+    assert parse_gpu_count(str(script)) is None
 
 
 def test_select_idle_gpus_requires_stable_low_memory_for_120_seconds(monkeypatch):

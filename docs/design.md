@@ -6,7 +6,7 @@ GPUDock is a local scheduler for GPU-backed bash scripts. It constrains executio
 
 - Accept only absolute `.sh` script paths, optionally prefixed with environment assignments.
 - Parse `GPU_COUNT` from each submitted command first, then from the script.
-- Launch tasks only on GPUs that stay below 1% memory usage for 120 seconds.
+- Launch GPU tasks only on GPUs that stay below 1% memory usage for the task's `min_idle_seconds`.
 - Reserve assigned GPUs locally until the owning task exits.
 - Inject `CUDA_DEVICES` and override `GPU_COUNT` at launch time.
 - Keep new task groups in `draft` until the user explicitly starts them.
@@ -30,6 +30,7 @@ The old `queue` column from earlier versions is ignored if it exists in an upgra
 GPU-specific fields:
 
 - `gpu_count`: parsed from the submitted command or script.
+- `min_idle_seconds`: task-specific continuous idle window, default `120`, max `86400`.
 - `assigned_gpu_ids`: comma-separated GPU IDs injected as `CUDA_DEVICES`.
 
 Task group status is derived from commands:
@@ -54,9 +55,10 @@ Task group execution state is stored separately from derived display status:
 Submissions are rejected unless `command` is:
 
 - an absolute `.sh` file path; or
-- optional `KEY=value` assignments followed by optional `bash` and an absolute `.sh` file path; and
-- either a submitted `GPU_COUNT=<positive integer>` assignment or a script containing
-  `GPU_COUNT=<positive integer>` or `export GPU_COUNT=<positive integer>`.
+- optional `KEY=value` assignments followed by optional `bash` and an absolute `.sh` file path.
+
+`GPU_COUNT` is optional. If it is missing from both the submitted command and the
+script, GPUDock treats the command as a non-GPU task and does not reserve or inject GPUs.
 
 This intentionally rejects arbitrary shell strings.
 
@@ -84,13 +86,15 @@ GPUDock reads GPU memory usage using `nvidia-smi`:
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits
 ```
 
-A GPU is idle only after it has stayed below the threshold for 120 continuous seconds:
+A GPU is idle only after it has stayed below the threshold for the task's required
+continuous idle window. The default is 120 seconds, and `min_idle_seconds` can be
+set from `0` to `86400` seconds:
 
 ```text
 memory.used / memory.total < 0.01
 ```
 
-GPUDock tracks the first observed low-memory timestamp for each GPU. If a GPU rises back to 1% memory usage or higher, its timer is reset. This avoids assigning a card that briefly appears free while another process is still starting, shutting down, or between allocation phases.
+GPUDock tracks the first observed low-memory timestamp for each GPU. If a GPU rises back to 1% memory usage or higher, its timer is reset. The stored timestamp is capped so elapsed idle time never grows beyond the configured maximum. This avoids assigning a card that briefly appears free while another process is still starting, shutting down, or between allocation phases.
 
 If a task needs `GPU_COUNT=n`, GPUDock selects the first `n` stable-idle GPU IDs. If fewer than `n` GPUs are idle, the task returns to `pending` with:
 
@@ -107,13 +111,17 @@ The scheduler is group-aware:
 1. It looks for groups whose execution state is `running`.
 2. It skips any group that has an error command.
 3. It chooses the first pending command by `position` from each runnable group.
-4. It launches selected commands in separate runner threads when GPU requirements are met.
+4. If the command declares `GPU_COUNT`, it tries to reserve GPUs that satisfy that command's `min_idle_seconds`.
+5. If GPUs are insufficient, it requeues the command with `waiting_for_gpu`, skips that group for the current pass, and keeps scanning later groups.
+6. If the command has no `GPU_COUNT`, it skips GPU reservation.
+7. It launches selected commands in separate runner threads when their scheduling requirements are met.
 
 This gives the desired behavior:
 
 - same task group: serial execution;
 - different task groups: parallel execution;
 - failed command: blocks only its own task group.
+- GPU-short command: skipped for the current pass, so later runnable groups can still use available GPUs.
 
 Killed commands are requeued with `run_after_id` so they are selected ahead of later commands in the same group.
 
@@ -131,9 +139,9 @@ bash /absolute/path/to/script.sh
 
 Environment assignments submitted before the script are passed into the subprocess environment. GPUDock still launches the parsed script path directly with `bash`; it does not run the submitted text through a shell.
 
-If the submitted command includes `GPU_COUNT=<n>`, that value is used for scheduling and for the launched subprocess environment. If it is omitted, GPUDock reads the script's last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment.
+If the submitted command includes `GPU_COUNT=<n>`, that value is used for scheduling and for the launched subprocess environment. If it is omitted, GPUDock reads the script's last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment. If neither source declares `GPU_COUNT`, the task is non-GPU.
 
-It injects:
+For GPU tasks, it injects:
 
 ```text
 CUDA_DEVICES=<selected ids>
@@ -141,6 +149,8 @@ GPU_COUNT=<number of selected ids>
 ```
 
 This overrides any submitted or parent `CUDA_DEVICES` value. `GPU_COUNT` comes from the submitted command when present, otherwise from the script.
+
+For non-GPU tasks, GPUDock does not inject `CUDA_DEVICES` or `GPU_COUNT`.
 
 ## Email
 
@@ -162,6 +172,10 @@ subprocess.Popen(..., start_new_session=True)
 
 Killing a launched task sends `SIGTERM` to that process group. If the group is still present after a short grace period, GPUDock follows up with `SIGKILL`. This targets the top-level bash process and child processes started by that script.
 
+After a launched task is killed, GPUDock moves that command back to `pending`, preserves
+its retry priority inside the task group, and pauses the whole task group. The command
+will not be scheduled again until the user starts the task group.
+
 There is also a short pre-launch window where a task is already marked `running` but no subprocess PID has been recorded yet. A kill request during that window marks the task `canceled` with:
 
 ```text
@@ -179,7 +193,8 @@ The dashboard is intentionally thin: it calls the same HTTP endpoints as externa
 - creating task groups;
 - viewing group summaries before command details;
 - opening a draft group to submit commands;
-- moving pending commands up or down before the group starts;
+- viewing queued/running/error commands separately from succeeded/canceled history;
+- moving pending commands up or down before the group starts; active queue order is renumbered from 1 and excludes succeeded/canceled commands;
 - starting a prepared group;
 - pausing a running group so no later pending command is claimed;
 - viewing GPU requirements, assigned GPU IDs, and submission timestamps;
@@ -206,10 +221,10 @@ GPUDock distinguishes:
 3. Insufficient GPU availability
    - Scheduler condition, not a script failure.
    - Moves back to `pending`.
-   - Requires enough GPUs to remain below 1% memory usage for 120 seconds.
+   - Requires enough GPUs to remain below 1% memory usage for the task's `min_idle_seconds`.
 
 4. Validation failure
-   - Invalid path or missing `GPU_COUNT`.
+   - Invalid path or invalid `GPU_COUNT`.
    - Moves to `error` if discovered during worker execution.
    - API/CLI submission rejects invalid scripts before insert.
 

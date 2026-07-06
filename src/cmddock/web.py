@@ -212,7 +212,27 @@ def render_index() -> str:
     .notice.error { border-color: #f1b8b2; color: var(--danger); background: #fff4f2; }
     .notice.ok { border-color: #acd7c0; color: var(--ok); background: #f0fbf5; }
 
+    .schedule-warning {
+      display: none;
+      margin-bottom: 14px;
+      color: var(--danger);
+      font-weight: 650;
+      font-size: 14px;
+    }
+
+    .schedule-warning.show { display: block; }
+
     .table-wrap { overflow-x: auto; }
+
+    .history-block {
+      border-top: 1px solid var(--border);
+      margin-top: 4px;
+    }
+
+    .history-block .section-header {
+      min-height: 52px;
+      background: #fbfcfe;
+    }
 
     table {
       width: 100%;
@@ -404,6 +424,7 @@ def render_index() -> str:
         </div>
       </div>
       <div class="panel-body">
+        <div id="schedule-warning" class="schedule-warning"></div>
         <form id="submit-form">
           <div class="field">
             <label for="script-path">Script command</label>
@@ -418,6 +439,18 @@ def render_index() -> str:
             <label for="cwd">Working directory</label>
             <input id="cwd" name="cwd" placeholder="optional" />
           </div>
+          <div class="field">
+            <label for="min-idle-seconds">Min idle seconds</label>
+            <input
+              id="min-idle-seconds"
+              name="min_idle_seconds"
+              type="number"
+              min="0"
+              max="86400"
+              step="1"
+              value="120"
+            />
+          </div>
           <div class="actions">
             <button class="primary" type="submit">Submit To Group</button>
           </div>
@@ -431,6 +464,7 @@ def render_index() -> str:
               <th>Order</th>
               <th>Status</th>
               <th>GPU</th>
+              <th>Idle</th>
               <th>Script</th>
               <th>Submitted</th>
               <th>Actions</th>
@@ -438,7 +472,29 @@ def render_index() -> str:
           </thead>
           <tbody id="tasks-body"></tbody>
         </table>
-        <div id="tasks-empty" class="empty">No tasks in this group yet.</div>
+        <div id="tasks-empty" class="empty">No queued or active tasks in this group.</div>
+      </div>
+      <div class="history-block">
+        <div class="section-header">
+          <h2>Completed / Canceled</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Status</th>
+                <th>GPU</th>
+                <th>Idle</th>
+                <th>Script</th>
+                <th>Finished</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="history-body"></tbody>
+          </table>
+          <div id="history-empty" class="empty">No completed or canceled tasks yet.</div>
+        </div>
       </div>
     </section>
   </main>
@@ -465,12 +521,15 @@ def render_index() -> str:
     const notice = document.querySelector("#notice");
     const groupsBody = document.querySelector("#groups-body");
     const tasksBody = document.querySelector("#tasks-body");
+    const historyBody = document.querySelector("#history-body");
     const groupsEmpty = document.querySelector("#groups-empty");
     const tasksEmpty = document.querySelector("#tasks-empty");
+    const historyEmpty = document.querySelector("#history-empty");
     const health = document.querySelector("#health");
     const logsModal = document.querySelector("#logs-modal");
     const groupsSection = document.querySelector("#groups-section");
     const detailSection = document.querySelector("#detail-section");
+    const scheduleWarning = document.querySelector("#schedule-warning");
     let selectedGroup = null;
     let currentTasks = [];
 
@@ -487,7 +546,20 @@ def render_index() -> str:
     function taskGpu(task) {
       if (task.assigned_gpu_ids) return task.assigned_gpu_ids;
       if (task.gpu_count) return `needs ${task.gpu_count}`;
-      return "";
+      return "non-GPU";
+    }
+
+    function taskIdle(task) {
+      if (!task.gpu_count) return "ignored";
+      return `${task.min_idle_seconds ?? 120}s`;
+    }
+
+    function isTerminalTask(task) {
+      return task.status === "succeeded" || task.status === "canceled";
+    }
+
+    function taskActivityTime(task) {
+      return new Date(task.finished_at || task.started_at || task.submitted_at).getTime();
     }
 
     function groupCounts(group) {
@@ -583,32 +655,53 @@ def render_index() -> str:
       document.querySelector("#delete-group-button").disabled = !(
         group.status === "completed" || group.status === "empty"
       );
+      if (group.execution_state === "draft") {
+        scheduleWarning.textContent =
+          "This task group has not been started. Commands will not be scheduled.";
+        scheduleWarning.classList.add("show");
+      } else if (group.execution_state === "paused") {
+        scheduleWarning.textContent =
+          "This task group is paused. Pending commands will not be scheduled.";
+        scheduleWarning.classList.add("show");
+      } else {
+        scheduleWarning.textContent = "";
+        scheduleWarning.classList.remove("show");
+      }
     }
 
     function renderTasks(tasks) {
-      currentTasks = tasks;
+      const activeTasks = tasks.filter((task) => !isTerminalTask(task));
+      const historyTasks = tasks
+        .filter(isTerminalTask)
+        .sort((left, right) => taskActivityTime(right) - taskActivityTime(left));
+      currentTasks = activeTasks;
       tasksBody.innerHTML = "";
-      tasksEmpty.style.display = tasks.length ? "none" : "block";
-      for (const [index, task] of tasks.entries()) {
+      historyBody.innerHTML = "";
+      tasksEmpty.style.display = activeTasks.length ? "none" : "block";
+      historyEmpty.style.display = historyTasks.length ? "none" : "block";
+      const pendingTasks = activeTasks.filter((task) => task.status === "pending");
+      for (const [index, task] of activeTasks.entries()) {
         const canRetry = task.status === "error" ? "" : "disabled";
         const canCancel = task.status === "pending" ? "" : "disabled";
         const canKill = task.status === "running" ? "" : "disabled";
+        const pendingIndex = pendingTasks.findIndex((pendingTask) => pendingTask.id === task.id);
         const canMove = selectedGroup && selectedGroup.execution_state === "draft"
           && task.status === "pending";
-        const upDisabled = canMove && index > 0 ? "" : "disabled";
-        const downDisabled = canMove && index < tasks.length - 1 ? "" : "disabled";
+        const upDisabled = canMove && pendingIndex > 0 ? "" : "disabled";
+        const downDisabled = canMove && pendingIndex < pendingTasks.length - 1 ? "" : "disabled";
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td>${task.id}</td>
           <td>
             <div class="task-actions">
-              <span>${task.position}</span>
+              <span>${index + 1}</span>
               <button data-action="move-up" data-id="${task.id}" ${upDisabled}>Up</button>
               <button data-action="move-down" data-id="${task.id}" ${downDisabled}>Down</button>
             </div>
           </td>
           <td><span class="badge ${task.status}">${task.status}</span></td>
           <td>${taskGpu(task)}</td>
+          <td>${taskIdle(task)}</td>
           <td class="command">${task.command}</td>
           <td>${formatTime(task.submitted_at)}</td>
           <td>
@@ -623,6 +716,23 @@ def render_index() -> str:
           </td>
         `;
         tasksBody.appendChild(tr);
+      }
+      for (const task of historyTasks) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${task.id}</td>
+          <td><span class="badge ${task.status}">${task.status}</span></td>
+          <td>${taskGpu(task)}</td>
+          <td>${taskIdle(task)}</td>
+          <td class="command">${task.command}</td>
+          <td>${formatTime(task.finished_at)}</td>
+          <td>
+            <div class="task-actions">
+              <button data-action="logs" data-id="${task.id}">Logs</button>
+            </div>
+          </td>
+        `;
+        historyBody.appendChild(tr);
       }
     }
 
@@ -655,6 +765,8 @@ def render_index() -> str:
       };
       const cwd = document.querySelector("#cwd").value.trim();
       if (cwd) payload.cwd = cwd;
+      const minIdleSeconds = Number(document.querySelector("#min-idle-seconds").value || 120);
+      payload.min_idle_seconds = minIdleSeconds;
       try {
         const task = await api("/commands", {
           method: "POST",
@@ -701,8 +813,8 @@ def render_index() -> str:
       await refreshSelectedGroup();
     }
 
-    async function savePendingOrder(tasks) {
-      const pendingIds = tasks.filter((task) => task.status === "pending").map((task) => task.id);
+    async function savePendingOrder(pendingTasks) {
+      const pendingIds = pendingTasks.map((task) => task.id);
       await api(`/groups/${selectedGroup.id}/commands/order`, {
         method: "PATCH",
         body: JSON.stringify({ command_ids: pendingIds }),
@@ -711,10 +823,11 @@ def render_index() -> str:
     }
 
     async function moveTask(taskId, direction) {
-      const index = currentTasks.findIndex((task) => task.id === Number(taskId));
+      const pendingTasks = currentTasks.filter((task) => task.status === "pending");
+      const index = pendingTasks.findIndex((task) => task.id === Number(taskId));
       const nextIndex = index + direction;
-      if (index < 0 || nextIndex < 0 || nextIndex >= currentTasks.length) return;
-      const reordered = [...currentTasks];
+      if (index < 0 || nextIndex < 0 || nextIndex >= pendingTasks.length) return;
+      const reordered = [...pendingTasks];
       [reordered[index], reordered[nextIndex]] = [reordered[nextIndex], reordered[index]];
       await savePendingOrder(reordered);
       showNotice("Task order updated.", "ok");

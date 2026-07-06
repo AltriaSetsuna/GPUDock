@@ -192,6 +192,7 @@ def build_app(settings: Settings) -> FastAPI:
                 group_id=payload.group_id,
                 gpu_count=gpu_count,
                 group_name=payload.group_name,
+                min_idle_seconds=payload.min_idle_seconds,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -8,12 +8,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from cmddock.scheduling import DEFAULT_MIN_IDLE_SECONDS, MAX_MIN_IDLE_SECONDS
+
 GPU_COUNT_PATTERN = re.compile(
     r"""(?m)^\s*(?:export\s+)?GPU_COUNT\s*=\s*["']?(?P<count>\d+)["']?\s*(?:#.*)?$"""
 )
 ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 IDLE_MEMORY_THRESHOLD = 0.01
-IDLE_STABILITY_SECONDS = 120.0
+IDLE_STABILITY_SECONDS = float(DEFAULT_MIN_IDLE_SECONDS)
+MAX_IDLE_SECONDS = float(MAX_MIN_IDLE_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -57,6 +60,7 @@ class StableIdleGPUTracker:
         statuses: list[GPUStatus],
         threshold: float = IDLE_MEMORY_THRESHOLD,
         stability_seconds: float = IDLE_STABILITY_SECONDS,
+        max_idle_seconds: float = MAX_IDLE_SECONDS,
     ) -> list[int]:
         now = self._clock()
         observed_gpu_ids = {status.gpu_id for status in statuses}
@@ -71,7 +75,10 @@ class StableIdleGPUTracker:
                 if status.memory_usage_ratio < threshold:
                     self._low_memory_since_by_gpu_id.setdefault(status.gpu_id, now)
                     low_memory_since = self._low_memory_since_by_gpu_id[status.gpu_id]
-                    if now - low_memory_since >= stability_seconds:
+                    idle_seconds = min(max(now - low_memory_since, 0.0), max_idle_seconds)
+                    if idle_seconds >= max_idle_seconds:
+                        self._low_memory_since_by_gpu_id[status.gpu_id] = now - max_idle_seconds
+                    if idle_seconds >= stability_seconds:
                         idle_gpu_ids.append(status.gpu_id)
                 else:
                     self._low_memory_since_by_gpu_id.pop(status.gpu_id, None)
@@ -99,6 +106,7 @@ class GPUReservationManager:
                 statuses,
                 threshold,
                 stability_seconds,
+                MAX_IDLE_SECONDS,
             )
             available_gpu_ids = [
                 gpu_id for gpu_id in idle_gpu_ids if gpu_id not in self._reserved_gpu_ids
@@ -178,7 +186,7 @@ def parse_submission_command(command: str) -> ParsedCommand:
     )
 
 
-def parse_gpu_count(command: str) -> int:
+def parse_gpu_count(command: str) -> int | None:
     parsed = parse_submission_command(command)
     if "GPU_COUNT" in parsed.env_overrides:
         return _parse_positive_gpu_count(
@@ -190,7 +198,7 @@ def parse_gpu_count(command: str) -> int:
     content = path.read_text(errors="replace")
     matches = list(GPU_COUNT_PATTERN.finditer(content))
     if not matches:
-        raise ValueError("Bash script must define GPU_COUNT, for example: export GPU_COUNT=1")
+        return None
     return _parse_positive_gpu_count(matches[-1].group("count"), "GPU_COUNT")
 
 
@@ -234,7 +242,7 @@ def get_idle_gpu_ids(
     tracker: StableIdleGPUTracker = DEFAULT_IDLE_TRACKER,
 ) -> list[int]:
     statuses = get_gpu_memory_status()
-    return tracker.get_idle_gpu_ids(statuses, threshold, stability_seconds)
+    return tracker.get_idle_gpu_ids(statuses, threshold, stability_seconds, MAX_IDLE_SECONDS)
 
 
 def select_idle_gpus(

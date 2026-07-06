@@ -14,6 +14,11 @@ from cmddock.database import Database
 from cmddock.gpu import parse_gpu_count, parse_submission_command
 from cmddock.models import CommandStatus
 from cmddock.process_control import terminate_process_group
+from cmddock.scheduling import (
+    DEFAULT_MIN_IDLE_SECONDS,
+    MAX_MIN_IDLE_SECONDS,
+    normalize_min_idle_seconds,
+)
 from cmddock.worker import GroupScheduler
 
 app = typer.Typer(
@@ -130,6 +135,12 @@ def add(
     cwd: Annotated[Path | None, typer.Option(help="Working directory for the command.")] = None,
     group: Annotated[str, typer.Option(help="Task group name.")] = "default",
     group_id: Annotated[int | None, typer.Option(help="Existing task group ID.")] = None,
+    min_idle_seconds: Annotated[
+        int,
+        typer.Option(
+            help=f"Required continuous idle seconds for GPU tasks, max {MAX_MIN_IDLE_SECONDS}.",
+        ),
+    ] = DEFAULT_MIN_IDLE_SECONDS,
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
     """Add a validated GPU script command to a task group."""
@@ -138,12 +149,14 @@ def add(
     try:
         parsed = parse_submission_command(command)
         gpu_count = parse_gpu_count(command)
+        normalized_min_idle_seconds = normalize_min_idle_seconds(min_idle_seconds)
         record = database.create_command(
             parsed.command,
             str(cwd) if cwd is not None else None,
             group_id=group_id,
             gpu_count=gpu_count,
             group_name=None if group_id is not None else group,
+            min_idle_seconds=normalized_min_idle_seconds,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="command") from exc
