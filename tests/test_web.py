@@ -11,6 +11,7 @@ def test_group_detail_separates_active_queue_from_terminal_history() -> None:
     assert "Completed / Canceled" in html
     assert "No queued or active tasks in this group." in html
     assert 'task.status === "succeeded" || task.status === "canceled"' in html
+    assert "isKilledPendingTask(task)" in html
     assert "<span>${index + 1}</span>" in html
 
 

@@ -176,6 +176,9 @@ After a launched task is killed, GPUDock moves that command back to `pending`, p
 its retry priority inside the task group, and pauses the whole task group. The command
 will not be scheduled again until the user starts the task group.
 
+Retrying that killed pending command clears the killed metadata and keeps the task group
+paused. The user must start the task group manually before the command can be scheduled.
+
 There is also a short pre-launch window where a task is already marked `running` but no subprocess PID has been recorded yet. A kill request during that window marks the task `canceled` with:
 
 ```text

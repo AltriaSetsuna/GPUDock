@@ -118,6 +118,25 @@ def test_killed_command_requeues_ahead_and_pauses_group(tmp_path):
     assert next_claimed["id"] == first["id"]
 
 
+def test_killed_pending_command_can_be_retried_without_starting_group(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("sleep 10", None)
+    _start_group_for_command(database, command)
+    database.claim_next_pending_command()
+    database.requeue_killed(command["id"], -15, "killed_by_signal:SIGTERM")
+
+    retried = database.retry_command(command["id"])
+    group = database.get_task_group(command["group_id"])
+
+    assert retried["status"] == CommandStatus.PENDING
+    assert retried["exit_status"] is None
+    assert retried["exit_code"] is None
+    assert retried["error_message"] is None
+    assert retried["run_after_id"] is None
+    assert group["execution_state"] == GroupExecutionState.PAUSED
+    assert database.claim_next_pending_command() is None
+
+
 def test_running_pid_is_recorded_and_cleared_on_finish(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     command = database.create_command("sleep 10", None)

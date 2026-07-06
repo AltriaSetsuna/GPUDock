@@ -562,6 +562,12 @@ def render_index() -> str:
       return new Date(task.finished_at || task.started_at || task.submitted_at).getTime();
     }
 
+    function isKilledPendingTask(task) {
+      return task.status === "pending"
+        && task.exit_status
+        && task.exit_status.startsWith("killed_by_signal:");
+    }
+
     function groupCounts(group) {
       return [
         `run ${group.running_count}`,
@@ -681,7 +687,7 @@ def render_index() -> str:
       historyEmpty.style.display = historyTasks.length ? "none" : "block";
       const pendingTasks = activeTasks.filter((task) => task.status === "pending");
       for (const [index, task] of activeTasks.entries()) {
-        const canRetry = task.status === "error" ? "" : "disabled";
+        const canRetry = task.status === "error" || isKilledPendingTask(task) ? "" : "disabled";
         const canCancel = task.status === "pending" ? "" : "disabled";
         const canKill = task.status === "running" ? "" : "disabled";
         const pendingIndex = pendingTasks.findIndex((pendingTask) => pendingTask.id === task.id);

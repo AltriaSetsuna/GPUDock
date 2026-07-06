@@ -255,6 +255,7 @@ Important behavior:
 - Running commands can be killed with `gpudock kill <id>`.
 - Killed launched commands receive `SIGTERM` as a process group, followed by `SIGKILL` if needed, so child processes started by the bash script are targeted too.
 - Killed launched commands return to `pending`, keep priority within their task group, and pause the whole task group so they are not immediately rescheduled.
+- Retrying a killed pending command clears its killed state but does not restart the task group; the user must start the task group manually.
 - Running commands that have not launched a subprocess yet can be killed; they are marked `canceled` with `exit_status = canceled_before_launch`.
 - Insufficient stable-idle GPUs return commands to `pending` with `exit_status = waiting_for_gpu`.
 - GPU tasks use `min_idle_seconds` as their required continuous idle window; default `120`, max `86400`.

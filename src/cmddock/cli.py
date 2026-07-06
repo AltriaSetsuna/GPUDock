@@ -230,14 +230,14 @@ def cancel(
 
 @app.command()
 def retry(
-    command_id: Annotated[int, typer.Argument(help="Error command ID to retry.")],
+    command_id: Annotated[int, typer.Argument(help="Error or killed pending command ID to retry.")],
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Move an error command back into the pending state."""
+    """Move an error or killed pending command back into a clean pending state."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
     try:
-        typer.echo(_to_json(database.retry_error_command(command_id)))
+        typer.echo(_to_json(database.retry_command(command_id)))
     except (KeyError, ValueError) as exc:
         raise typer.BadParameter(str(exc), param_hint="command_id") from exc
 

@@ -237,7 +237,7 @@ def build_app(settings: Settings) -> FastAPI:
         app_state: AppState = state_dependency,
     ) -> dict:
         try:
-            record = app_state.database.retry_error_command(command_id)
+            record = app_state.database.retry_command(command_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:

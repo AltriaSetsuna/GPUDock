@@ -504,11 +504,17 @@ class Database:
             )
             return self.get_command(command_id, conn=conn)
 
-    def retry_error_command(self, command_id: int) -> dict[str, Any]:
+    def retry_command(self, command_id: int) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
             existing = self.get_command(command_id, conn=conn)
-            if existing["status"] != CommandStatus.ERROR:
-                raise ValueError("Only error commands can be retried.")
+            can_retry_error = existing["status"] == CommandStatus.ERROR
+            can_retry_killed = (
+                existing["status"] == CommandStatus.PENDING
+                and existing["exit_status"] is not None
+                and existing["exit_status"].startswith("killed_by_signal:")
+            )
+            if not (can_retry_error or can_retry_killed):
+                raise ValueError("Only error or killed pending commands can be retried.")
             conn.execute(
                 """
                 UPDATE commands
@@ -526,6 +532,9 @@ class Database:
                 (CommandStatus.PENDING, command_id),
             )
             return self.get_command(command_id, conn=conn)
+
+    def retry_error_command(self, command_id: int) -> dict[str, Any]:
+        return self.retry_command(command_id)
 
     def claim_next_pending_command(
         self,
