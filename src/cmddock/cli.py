@@ -253,7 +253,7 @@ def kill(
     try:
         current = database.get_command(command_id)
         if current["status"] == CommandStatus.RUNNING and current["pid"] is None:
-            typer.echo(_to_json(database.cancel_unlaunched_running_command(command_id)))
+            typer.echo(_to_json(database.requeue_unlaunched_killed(command_id)))
             return
         record = database.get_kill_target(command_id)
         terminate_process_group(record["pid"])

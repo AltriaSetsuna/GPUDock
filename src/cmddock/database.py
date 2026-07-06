@@ -46,7 +46,8 @@ class Database:
                     description TEXT,
                     created_at TEXT NOT NULL,
                     archived_at TEXT,
-                    execution_state TEXT NOT NULL DEFAULT 'draft'
+                    execution_state TEXT NOT NULL DEFAULT 'draft',
+                    manual_start_required INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -81,6 +82,12 @@ class Database:
                 "task_groups",
                 "execution_state",
                 "TEXT NOT NULL DEFAULT 'draft'",
+            )
+            self._ensure_column(
+                conn,
+                "task_groups",
+                "manual_start_required",
+                "INTEGER NOT NULL DEFAULT 0",
             )
             self._ensure_column(conn, "commands", "group_id", "INTEGER")
             self._ensure_column(conn, "commands", "position", "INTEGER NOT NULL DEFAULT 0")
@@ -207,6 +214,7 @@ class Database:
                     g.created_at,
                     g.archived_at,
                     g.execution_state,
+                    g.manual_start_required,
                     COUNT(c.id) AS total_count,
                     SUM(CASE WHEN c.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
                     SUM(CASE WHEN c.status = 'running' THEN 1 ELSE 0 END) AS running_count,
@@ -261,7 +269,12 @@ class Database:
             if group["pending_count"] == 0:
                 raise ValueError("Cannot start a task group with no pending commands.")
             conn.execute(
-                "UPDATE task_groups SET execution_state = ? WHERE id = ?",
+                """
+                UPDATE task_groups
+                SET execution_state = ?,
+                    manual_start_required = 0
+                WHERE id = ?
+                """,
                 (GroupExecutionState.RUNNING, group_id),
             )
             return self.get_task_group(group_id, conn=conn)
@@ -480,11 +493,11 @@ class Database:
             )
             return self.get_command(command_id, conn=conn)
 
-    def cancel_unlaunched_running_command(self, command_id: int) -> dict[str, Any]:
+    def requeue_unlaunched_killed(self, command_id: int) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
             existing = self.get_command(command_id, conn=conn)
             if existing["status"] != CommandStatus.RUNNING:
-                raise ValueError("Only running commands can be canceled before launch.")
+                raise ValueError("Only running commands can be killed before launch.")
             if existing["pid"] is not None:
                 raise ValueError("Running command already has a recorded process ID.")
             conn.execute(
@@ -493,25 +506,42 @@ class Database:
                 SET status = ?,
                     finished_at = ?,
                     exit_code = NULL,
-                    exit_status = 'canceled_before_launch',
+                    exit_status = 'killed_before_launch',
                     pid = NULL,
                     assigned_gpu_ids = NULL,
-                    error_message = 'Canceled before the subprocess was launched.',
-                    run_after_id = NULL
+                    error_message = 'Killed before launch; retry requires manual group start.',
+                    run_after_id = ?
                 WHERE id = ? AND status = ? AND pid IS NULL
                 """,
-                (CommandStatus.CANCELED, utc_now(), command_id, CommandStatus.RUNNING),
+                (CommandStatus.PENDING, utc_now(), command_id, command_id, CommandStatus.RUNNING),
+            )
+            conn.execute(
+                """
+                UPDATE task_groups
+                SET execution_state = ?,
+                    manual_start_required = 1
+                WHERE id = ?
+                """,
+                (GroupExecutionState.PAUSED, existing["group_id"]),
             )
             return self.get_command(command_id, conn=conn)
+
+    def cancel_unlaunched_running_command(self, command_id: int) -> dict[str, Any]:
+        return self.requeue_unlaunched_killed(command_id)
 
     def retry_command(self, command_id: int) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
             existing = self.get_command(command_id, conn=conn)
             can_retry_error = existing["status"] == CommandStatus.ERROR
+            exit_status = existing["exit_status"] or ""
+            error_message = existing["error_message"] or ""
             can_retry_killed = (
                 existing["status"] == CommandStatus.PENDING
-                and existing["exit_status"] is not None
-                and existing["exit_status"].startswith("killed_by_signal:")
+                and (
+                    exit_status.startswith("killed_by_signal:")
+                    or error_message.startswith("Killed by signal;")
+                    or existing["run_after_id"] == command_id
+                )
             )
             if not (can_retry_error or can_retry_killed):
                 raise ValueError("Only error or killed pending commands can be retried.")
@@ -530,6 +560,15 @@ class Database:
                 WHERE id = ?
                 """,
                 (CommandStatus.PENDING, command_id),
+            )
+            conn.execute(
+                """
+                UPDATE task_groups
+                SET execution_state = ?,
+                    manual_start_required = 1
+                WHERE id = ?
+                """,
+                (GroupExecutionState.PAUSED, existing["group_id"]),
             )
             return self.get_command(command_id, conn=conn)
 
@@ -555,6 +594,7 @@ class Database:
                 WHERE c.status = ?
                   AND g.archived_at IS NULL
                   AND g.execution_state = ?
+                  AND g.manual_start_required = 0
                   {excluded_clause}
                   AND NOT EXISTS (
                       SELECT 1
@@ -659,14 +699,13 @@ class Database:
             conn.execute(
                 """
                 UPDATE task_groups
-                SET execution_state = ?
+                SET execution_state = ?,
+                    manual_start_required = 1
                 WHERE id = ?
-                  AND execution_state = ?
                 """,
                 (
                     GroupExecutionState.PAUSED,
                     existing["group_id"],
-                    GroupExecutionState.RUNNING,
                 ),
             )
             return self.get_command(command_id, conn=conn)
@@ -832,6 +871,7 @@ class Database:
             "created_at": row["created_at"],
             "archived_at": row["archived_at"],
             "execution_state": row["execution_state"],
+            "manual_start_required": bool(row["manual_start_required"]),
             "status": status,
             "total_count": total_count,
             "pending_count": pending_count,

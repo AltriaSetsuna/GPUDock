@@ -19,3 +19,16 @@ def test_list_commands_endpoint_treats_app_state_as_dependency(tmp_path):
 
     assert query_param_names == {"status", "group_id"}
     assert dependency_names == {"app_state"}
+
+
+def test_retry_endpoint_does_not_wake_workers(tmp_path):
+    settings = build_settings(data_dir=tmp_path / "data")
+    app = build_app(settings)
+    route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/commands/{command_id}/retry"
+        and "POST" in getattr(route, "methods", set())
+    )
+
+    assert "wake_workers" not in route.endpoint.__code__.co_names

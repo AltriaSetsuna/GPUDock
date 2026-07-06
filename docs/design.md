@@ -176,16 +176,23 @@ After a launched task is killed, GPUDock moves that command back to `pending`, p
 its retry priority inside the task group, and pauses the whole task group. The command
 will not be scheduled again until the user starts the task group.
 
-Retrying that killed pending command clears the killed metadata and keeps the task group
-paused. The user must start the task group manually before the command can be scheduled.
+Retrying a killed pending command or an error command clears the command's failure
+metadata, keeps the task group paused, and marks it as requiring a manual restart.
+GPUDock does not wake the scheduler for retry requests; the user must start the task
+group manually before the command can be scheduled.
 
-There is also a short pre-launch window where a task is already marked `running` but no subprocess PID has been recorded yet. A kill request during that window marks the task `canceled` with:
+There is also a short pre-launch window where a task is already marked `running` but no subprocess PID has been recorded yet. A kill request during that window requeues the task with:
 
 ```text
-exit_status = canceled_before_launch
+exit_status = killed_before_launch
 ```
 
-Before launching, the worker re-reads the command status. The final status check, subprocess launch, PID recording, and assigned-GPU recording happen while holding the scheduler database lock. A kill request therefore has only two outcomes: it cancels the task before launch, or it sees a recorded process group PID and can signal the whole script tree.
+The task group is paused and marked as requiring a manual restart, so the command cannot
+be claimed again until the user explicitly starts the group. Before launching, the worker
+re-reads the command status. The final status check, subprocess launch, PID recording,
+and assigned-GPU recording happen while holding the scheduler database lock. A kill
+request therefore has only two outcomes: it requeues and pauses the task before launch,
+or it sees a recorded process group PID and can signal the whole script tree.
 
 ## Visual Dashboard
 

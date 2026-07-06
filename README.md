@@ -240,7 +240,7 @@ pending -> running -> succeeded
 pending -> running -> error
 pending -> canceled
 running -> killed -> pending + paused group
-running -> canceled_before_launch -> canceled
+running -> killed_before_launch -> pending + paused group
 running -> waiting_for_gpu -> pending
 ```
 
@@ -250,13 +250,13 @@ Important behavior:
 - New commands stay pending in a draft group until the group is started.
 - Pending commands can be reordered only while their task group is draft.
 - Non-zero self exit becomes `error` and blocks later commands in the same task group.
-- Retrying an error command moves it back to `pending`.
+- Retrying an error command moves it back to `pending`, pauses the task group, and requires a manual group start before scheduling.
 - Pending commands can be canceled.
 - Running commands can be killed with `gpudock kill <id>`.
 - Killed launched commands receive `SIGTERM` as a process group, followed by `SIGKILL` if needed, so child processes started by the bash script are targeted too.
 - Killed launched commands return to `pending`, keep priority within their task group, and pause the whole task group so they are not immediately rescheduled.
-- Retrying a killed pending command clears its killed state but does not restart the task group; the user must start the task group manually.
-- Running commands that have not launched a subprocess yet can be killed; they are marked `canceled` with `exit_status = canceled_before_launch`.
+- Retrying a killed pending command clears its killed state and marks the task group as requiring a manual restart; the user must start the task group manually.
+- Running commands that have not launched a subprocess yet can be killed; they return to `pending` with `exit_status = killed_before_launch`, pause the task group, and require a manual group start before scheduling.
 - Insufficient stable-idle GPUs return commands to `pending` with `exit_status = waiting_for_gpu`.
 - GPU tasks use `min_idle_seconds` as their required continuous idle window; default `120`, max `86400`.
 

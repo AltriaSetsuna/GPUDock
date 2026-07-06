@@ -218,7 +218,7 @@ def test_command_runner_does_not_launch_after_prelaunch_cancel(tmp_path, monkeyp
     claimed = database.claim_next_pending_command()
 
     def reserve_then_cancel(gpu_count, **kwargs):
-        database.cancel_unlaunched_running_command(record["id"])
+        database.requeue_unlaunched_killed(record["id"])
         return GPUReservation([0], [0])
 
     def fail_if_launched(*args, **kwargs):
@@ -231,5 +231,10 @@ def test_command_runner_does_not_launch_after_prelaunch_cancel(tmp_path, monkeyp
     launched = CommandRunner(database, logs_dir).run_one(claimed)
 
     assert launched is True
-    assert database.get_command(record["id"])["status"] == CommandStatus.CANCELED
+    current = database.get_command(record["id"])
+    group = database.get_task_group(record["group_id"])
+    assert current["status"] == CommandStatus.PENDING
+    assert current["exit_status"] == "killed_before_launch"
+    assert group["execution_state"] == "paused"
+    assert group["manual_start_required"] is True
     assert released_gpu_ids == [0]

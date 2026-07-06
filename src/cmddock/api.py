@@ -135,7 +135,6 @@ def build_app(settings: Settings) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        app_state.wake_workers()
         return record
 
     @app.post("/groups/{group_id}/pause", response_model=TaskGroupRecord)
@@ -242,7 +241,6 @@ def build_app(settings: Settings) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        app_state.wake_workers()
         return record
 
     @app.post("/commands/{command_id}/kill", response_model=CommandRecord)
@@ -253,9 +251,7 @@ def build_app(settings: Settings) -> FastAPI:
         try:
             current = app_state.database.get_command(command_id)
             if current["status"] == CommandStatus.RUNNING and current["pid"] is None:
-                record = app_state.database.cancel_unlaunched_running_command(command_id)
-                app_state.wake_workers()
-                return record
+                return app_state.database.requeue_unlaunched_killed(command_id)
             record = app_state.database.get_kill_target(command_id)
             terminate_process_group(record["pid"])
             return record

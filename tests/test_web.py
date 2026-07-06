@@ -12,13 +12,18 @@ def test_group_detail_separates_active_queue_from_terminal_history() -> None:
     assert "No queued or active tasks in this group." in html
     assert 'task.status === "succeeded" || task.status === "canceled"' in html
     assert "isKilledPendingTask(task)" in html
+    assert 'task.exit_status === "killed_before_launch"' in html
     assert "<span>${index + 1}</span>" in html
 
 
 def test_group_detail_warns_when_group_is_not_schedulable() -> None:
     html = render_index()
+    manual_restart_warning = (
+        "This task group requires a manual restart. Pending commands will not be scheduled."
+    )
 
     assert 'id="schedule-warning"' in html
     assert "This task group has not been started. Commands will not be scheduled." in html
     assert "This task group is paused. Pending commands will not be scheduled." in html
+    assert manual_restart_warning in html
     assert 'group.execution_state === "draft" || group.execution_state === "paused"' in html

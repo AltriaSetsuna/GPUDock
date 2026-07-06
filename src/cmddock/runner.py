@@ -26,6 +26,13 @@ def classify_exit_code(exit_code: int) -> tuple[str, bool]:
         except ValueError:
             signal_name = f"SIG{signal_number}"
         return f"killed_by_signal:{signal_name}", True
+    if 128 < exit_code < 192:
+        signal_number = exit_code - 128
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"SIG{signal_number}"
+        return f"killed_by_signal:{signal_name}", True
     return f"exited_nonzero:{exit_code}", False
 
 

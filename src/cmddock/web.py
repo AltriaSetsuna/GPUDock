@@ -565,7 +565,10 @@ def render_index() -> str:
     function isKilledPendingTask(task) {
       return task.status === "pending"
         && task.exit_status
-        && task.exit_status.startsWith("killed_by_signal:");
+        && (
+          task.exit_status.startsWith("killed_by_signal:")
+          || task.exit_status === "killed_before_launch"
+        );
     }
 
     function groupCounts(group) {
@@ -667,8 +670,9 @@ def render_index() -> str:
           "This task group has not been started. Commands will not be scheduled.";
         scheduleWarning.classList.add("show");
       } else if (group.execution_state === "paused") {
-        scheduleWarning.textContent =
-          "This task group is paused. Pending commands will not be scheduled.";
+        scheduleWarning.textContent = group.manual_start_required
+          ? "This task group requires a manual restart. Pending commands will not be scheduled."
+          : "This task group is paused. Pending commands will not be scheduled.";
         scheduleWarning.classList.add("show");
       } else {
         scheduleWarning.textContent = "";

@@ -45,6 +45,7 @@ class TaskGroupRecord(BaseModel):
     created_at: datetime
     archived_at: datetime | None
     execution_state: GroupExecutionState
+    manual_start_required: bool
     status: GroupStatus
     total_count: int
     pending_count: int

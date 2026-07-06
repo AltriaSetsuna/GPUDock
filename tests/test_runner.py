@@ -29,6 +29,13 @@ def test_classify_signal_kill():
     assert killed is True
 
 
+def test_classify_bash_signal_exit_code():
+    exit_status, killed = classify_exit_code(143)
+
+    assert exit_status == "killed_by_signal:SIGTERM"
+    assert killed is True
+
+
 def test_classify_nonzero_exit():
     exit_status, killed = classify_exit_code(2)
 

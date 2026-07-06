@@ -108,6 +108,7 @@ def test_killed_command_requeues_ahead_and_pauses_group(tmp_path):
 
     assert group["execution_state"] == GroupExecutionState.PAUSED
     assert group["status"] == GroupStatus.PAUSED
+    assert group["manual_start_required"] is True
     assert blocked_claim is None
     pending_ids = [record["id"] for record in database.list_commands(CommandStatus.PENDING)]
     assert second["id"] in pending_ids
@@ -134,7 +135,58 @@ def test_killed_pending_command_can_be_retried_without_starting_group(tmp_path):
     assert retried["error_message"] is None
     assert retried["run_after_id"] is None
     assert group["execution_state"] == GroupExecutionState.PAUSED
+    assert group["manual_start_required"] is True
     assert database.claim_next_pending_command() is None
+
+
+def test_retry_error_command_requires_manual_group_start(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("false", None)
+    _start_group_for_command(database, command)
+    database.claim_next_pending_command()
+    database.mark_error(command["id"], 1, "exited_nonzero:1", "boom")
+
+    retried = database.retry_command(command["id"])
+    group = database.get_task_group(command["group_id"])
+
+    assert retried["status"] == CommandStatus.PENDING
+    assert group["execution_state"] == GroupExecutionState.PAUSED
+    assert group["manual_start_required"] is True
+    assert database.claim_next_pending_command() is None
+
+
+def test_retry_killed_pending_command_forces_group_to_remain_paused(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("sleep 10", None)
+    _start_group_for_command(database, command)
+    database.claim_next_pending_command()
+    database.requeue_killed(command["id"], -15, "killed_by_signal:SIGTERM")
+    database.start_task_group(command["group_id"])
+
+    retried = database.retry_command(command["id"])
+    group = database.get_task_group(command["group_id"])
+
+    assert retried["status"] == CommandStatus.PENDING
+    assert group["execution_state"] == GroupExecutionState.PAUSED
+    assert group["manual_start_required"] is True
+    assert database.claim_next_pending_command() is None
+
+
+def test_manual_start_required_blocks_claim_until_group_is_started(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("sleep 10", None)
+    _start_group_for_command(database, command)
+    database.claim_next_pending_command()
+    database.requeue_killed(command["id"], -15, "killed_by_signal:SIGTERM")
+    database.retry_command(command["id"])
+
+    blocked_claim = database.claim_next_pending_command()
+    started = database.start_task_group(command["group_id"])
+    claimed = database.claim_next_pending_command()
+
+    assert blocked_claim is None
+    assert started["manual_start_required"] is False
+    assert claimed["id"] == command["id"]
 
 
 def test_running_pid_is_recorded_and_cleared_on_finish(tmp_path):
@@ -154,7 +206,7 @@ def test_running_pid_is_recorded_and_cleared_on_finish(tmp_path):
     assert finished["pid"] is None
 
 
-def test_unlaunched_running_command_can_be_canceled(tmp_path):
+def test_unlaunched_running_command_kill_requeues_and_pauses_group(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     command = database.create_command("sleep 10", None)
     _start_group_for_command(database, command)
@@ -164,13 +216,18 @@ def test_unlaunched_running_command_can_be_canceled(tmp_path):
     assert claimed["status"] == CommandStatus.RUNNING
     assert claimed["pid"] is None
 
-    canceled = database.cancel_unlaunched_running_command(command["id"])
+    killed = database.requeue_unlaunched_killed(command["id"])
+    group = database.get_task_group(command["group_id"])
 
-    assert canceled["status"] == CommandStatus.CANCELED
-    assert canceled["finished_at"] is not None
-    assert canceled["exit_status"] == "canceled_before_launch"
-    assert canceled["pid"] is None
-    assert canceled["assigned_gpu_ids"] is None
+    assert killed["status"] == CommandStatus.PENDING
+    assert killed["finished_at"] is not None
+    assert killed["exit_status"] == "killed_before_launch"
+    assert killed["pid"] is None
+    assert killed["assigned_gpu_ids"] is None
+    assert killed["run_after_id"] == command["id"]
+    assert group["execution_state"] == GroupExecutionState.PAUSED
+    assert group["manual_start_required"] is True
+    assert database.claim_next_pending_command() is None
 
 
 def test_start_process_if_running_records_pid_and_assigned_gpus(tmp_path):
@@ -317,3 +374,4 @@ def test_existing_queue_database_is_migrated_to_default_group(tmp_path):
     assert commands[0]["group_name"] == "default"
     assert commands[0]["group_id"] == database.get_or_create_task_group("default")["id"]
     assert commands[0]["position"] == 1
+    assert database.get_or_create_task_group("default")["manual_start_required"] is False
