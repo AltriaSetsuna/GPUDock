@@ -32,3 +32,20 @@ def test_retry_endpoint_does_not_wake_workers(tmp_path):
     )
 
     assert "wake_workers" not in route.endpoint.__code__.co_names
+
+
+def test_group_order_endpoint_uses_payload_body_not_query_params(tmp_path):
+    settings = build_settings(data_dir=tmp_path / "data")
+    app = build_app(settings)
+    route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/groups/order"
+        and "PATCH" in getattr(route, "methods", set())
+    )
+
+    query_param_names = {param.name for param in route.dependant.query_params}
+    body_param_name = route.dependant.body_params[0].name
+
+    assert query_param_names == set()
+    assert body_param_name == "payload"

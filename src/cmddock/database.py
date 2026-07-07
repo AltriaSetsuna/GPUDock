@@ -44,6 +44,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE,
                     description TEXT,
+                    position INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     archived_at TEXT,
                     execution_state TEXT NOT NULL DEFAULT 'draft',
@@ -89,6 +90,7 @@ class Database:
                 "manual_start_required",
                 "INTEGER NOT NULL DEFAULT 0",
             )
+            self._ensure_column(conn, "task_groups", "position", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "commands", "group_id", "INTEGER")
             self._ensure_column(conn, "commands", "position", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "commands", "pid", "INTEGER")
@@ -105,6 +107,7 @@ class Database:
                 "UPDATE commands SET group_id = ? WHERE group_id IS NULL",
                 (default_group_id,),
             )
+            self._backfill_group_positions(conn)
             self._backfill_command_positions(conn)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_commands_status_submitted "
@@ -124,7 +127,7 @@ class Database:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_task_groups_archived "
-                "ON task_groups(archived_at, created_at DESC, id DESC)"
+                "ON task_groups(archived_at, position ASC, id ASC)"
             )
 
     def create_task_group(
@@ -136,16 +139,25 @@ class Database:
         if not clean_name:
             raise ValueError("Task group name cannot be empty.")
         with self._lock, self.connect() as conn:
+            existing = self._find_group_by_name(conn, clean_name)
+            if existing is not None:
+                raise ValueError(f"Task group '{clean_name}' already exists.")
             created_at = utc_now()
             try:
                 cur = conn.execute(
                     """
                     INSERT INTO task_groups (
-                        name, description, created_at, archived_at, execution_state
+                        name, description, position, created_at, archived_at, execution_state
                     )
-                    VALUES (?, ?, ?, NULL, ?)
+                    VALUES (?, ?, ?, ?, NULL, ?)
                     """,
-                    (clean_name, description, created_at, GroupExecutionState.DRAFT),
+                    (
+                        clean_name,
+                        description,
+                        self._next_group_position(conn),
+                        created_at,
+                        GroupExecutionState.DRAFT,
+                    ),
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"Task group '{clean_name}' already exists.") from exc
@@ -166,10 +178,7 @@ class Database:
             connection_context = self.connect()
             conn = connection_context.__enter__()
         try:
-            row = conn.execute(
-                "SELECT id FROM task_groups WHERE name = ?",
-                (clean_name,),
-            ).fetchone()
+            row = self._find_group_by_name(conn, clean_name)
             if row is not None:
                 group = self.get_task_group(row["id"], conn=conn)
                 if group["archived_at"] is not None:
@@ -209,6 +218,7 @@ class Database:
                 f"""
                 SELECT
                     g.id,
+                    g.position,
                     g.name,
                     g.description,
                     g.created_at,
@@ -227,13 +237,35 @@ class Database:
                 LEFT JOIN commands c ON c.group_id = g.id
                 {archive_filter}
                 GROUP BY g.id
-                ORDER BY latest_activity_at DESC, g.created_at DESC, g.id DESC
+                ORDER BY g.position ASC, g.id ASC
                 """
             ).fetchall()
             return [self._format_group(dict(row), conn=conn) for row in rows]
         finally:
             if owns_connection:
                 connection_context.__exit__(None, None, None)
+
+    def reorder_task_groups(self, group_ids: list[int]) -> list[dict[str, Any]]:
+        with self._lock, self.connect() as conn:
+            if len(group_ids) != len(set(group_ids)):
+                raise ValueError("Task group order contains duplicate group IDs.")
+            active_rows = conn.execute(
+                """
+                SELECT id
+                FROM task_groups
+                WHERE archived_at IS NULL
+                ORDER BY position ASC, id ASC
+                """
+            ).fetchall()
+            active_ids = [row["id"] for row in active_rows]
+            if set(group_ids) != set(active_ids):
+                raise ValueError("Task group order must include every active task group.")
+            for position, group_id in enumerate(group_ids, start=1):
+                conn.execute(
+                    "UPDATE task_groups SET position = ? WHERE id = ? AND archived_at IS NULL",
+                    (position, group_id),
+                )
+            return self.list_task_groups(conn=conn)
 
     def delete_task_group(self, group_id: int) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
@@ -621,6 +653,7 @@ class Database:
                       LIMIT 1
                   )
                 ORDER BY
+                    g.position ASC,
                     c.group_id ASC,
                     CASE WHEN c.run_after_id IS NULL THEN 1 ELSE 0 END ASC,
                     c.run_after_id ASC,
@@ -866,6 +899,7 @@ class Database:
             status = GroupStatus.PENDING
         return {
             "id": row["id"],
+            "position": row["position"],
             "name": row["name"],
             "description": row["description"],
             "created_at": row["created_at"],
@@ -915,17 +949,39 @@ class Database:
         name: str,
         description: str | None = None,
     ) -> int:
-        row = conn.execute("SELECT id FROM task_groups WHERE name = ?", (name,)).fetchone()
+        row = Database._find_group_by_name(conn, name)
         if row is not None:
             return row["id"]
         cur = conn.execute(
             """
-            INSERT INTO task_groups (name, description, created_at, archived_at, execution_state)
-            VALUES (?, ?, ?, NULL, ?)
+            INSERT INTO task_groups (
+                name, description, position, created_at, archived_at, execution_state
+            )
+            VALUES (?, ?, ?, ?, NULL, ?)
             """,
-            (name, description, utc_now(), GroupExecutionState.DRAFT),
+            (
+                name,
+                description,
+                Database._next_group_position(conn),
+                utc_now(),
+                GroupExecutionState.DRAFT,
+            ),
         )
         return cur.lastrowid
+
+    @staticmethod
+    def _find_group_by_name(conn: sqlite3.Connection, name: str) -> sqlite3.Row | None:
+        return conn.execute(
+            "SELECT id FROM task_groups WHERE name = ? COLLATE NOCASE",
+            (name,),
+        ).fetchone()
+
+    @staticmethod
+    def _next_group_position(conn: sqlite3.Connection) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM task_groups"
+        ).fetchone()
+        return int(row["next_position"])
 
     @staticmethod
     def _next_command_position(conn: sqlite3.Connection, group_id: int) -> int:
@@ -938,6 +994,23 @@ class Database:
             (group_id,),
         ).fetchone()
         return int(row["next_position"])
+
+    @staticmethod
+    def _backfill_group_positions(conn: sqlite3.Connection) -> None:
+        group_rows = conn.execute(
+            """
+            SELECT id
+            FROM task_groups
+            WHERE position <= 0
+            ORDER BY created_at ASC, id ASC
+            """
+        ).fetchall()
+        next_position = Database._next_group_position(conn)
+        for offset, group in enumerate(group_rows):
+            conn.execute(
+                "UPDATE task_groups SET position = ? WHERE id = ?",
+                (next_position + offset, group["id"]),
+            )
 
     @staticmethod
     def _backfill_command_positions(conn: sqlite3.Connection) -> None:

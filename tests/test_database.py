@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from cmddock.database import Database
 from cmddock.models import CommandStatus, GroupExecutionState, GroupStatus
 
@@ -21,22 +23,65 @@ def test_commands_are_listed_newest_first(tmp_path):
     assert records[0]["group_name"] == "default"
 
 
-def test_task_groups_are_created_and_listed_by_activity(tmp_path):
+def test_task_groups_are_created_and_listed_by_position(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     first = database.create_task_group("first")
     second = database.create_task_group("second", "experiment batch")
     command = database.create_command("echo run", None, group_id=first["id"])
 
     groups = database.list_task_groups()
+    ids = [group["id"] for group in groups]
 
-    assert groups[0]["id"] == first["id"]
-    assert groups[0]["execution_state"] == GroupExecutionState.DRAFT
-    assert groups[0]["status"] == GroupStatus.DRAFT
-    assert groups[0]["pending_count"] == 1
-    assert groups[0]["current_command_id"] == command["id"]
-    assert groups[1]["id"] == second["id"]
-    assert groups[1]["description"] == "experiment batch"
-    assert groups[1]["status"] == GroupStatus.EMPTY
+    assert ids == [database.get_or_create_task_group("default")["id"], first["id"], second["id"]]
+    assert groups[0]["position"] == 1
+    assert groups[1]["position"] == 2
+    assert groups[1]["execution_state"] == GroupExecutionState.DRAFT
+    assert groups[1]["status"] == GroupStatus.DRAFT
+    assert groups[1]["pending_count"] == 1
+    assert groups[1]["current_command_id"] == command["id"]
+    assert groups[2]["position"] == 3
+    assert groups[2]["description"] == "experiment batch"
+    assert groups[2]["status"] == GroupStatus.EMPTY
+
+
+def test_task_group_names_are_unique_case_insensitively(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+
+    database.create_task_group("Alpha")
+
+    with pytest.raises(ValueError, match="already exists"):
+        database.create_task_group("alpha")
+
+
+def test_task_groups_can_be_reordered(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    default = database.get_or_create_task_group("default")
+    first = database.create_task_group("first")
+    second = database.create_task_group("second")
+
+    reordered = database.reorder_task_groups([second["id"], default["id"], first["id"]])
+
+    assert [group["id"] for group in reordered] == [second["id"], default["id"], first["id"]]
+    assert [group["position"] for group in reordered] == [1, 2, 3]
+
+
+def test_task_group_order_controls_scheduler_priority(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    default = database.get_or_create_task_group("default")
+    group_a = database.create_task_group("group-a")
+    group_b = database.create_task_group("group-b")
+    a_command = database.create_command("echo a", None, group_id=group_a["id"])
+    b_command = database.create_command("echo b", None, group_id=group_b["id"])
+    database.reorder_task_groups([group_b["id"], group_a["id"], default["id"]])
+    database.start_task_group(group_a["id"])
+    database.start_task_group(group_b["id"])
+
+    first_claim = database.claim_next_pending_command()
+    database.mark_succeeded(b_command["id"], 0)
+    second_claim = database.claim_next_pending_command()
+
+    assert first_claim["id"] == b_command["id"]
+    assert second_claim["id"] == a_command["id"]
 
 
 def test_draft_group_is_not_claimed_until_started(tmp_path):
@@ -372,6 +417,8 @@ def test_existing_queue_database_is_migrated_to_default_group(tmp_path):
     commands = database.list_commands()
 
     assert commands[0]["group_name"] == "default"
-    assert commands[0]["group_id"] == database.get_or_create_task_group("default")["id"]
+    default_group = database.get_or_create_task_group("default")
+    assert commands[0]["group_id"] == default_group["id"]
     assert commands[0]["position"] == 1
-    assert database.get_or_create_task_group("default")["manual_start_required"] is False
+    assert default_group["position"] == 1
+    assert default_group["manual_start_required"] is False

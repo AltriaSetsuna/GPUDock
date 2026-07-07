@@ -16,6 +16,17 @@ def test_group_detail_separates_active_queue_from_terminal_history() -> None:
     assert "<span>${index + 1}</span>" in html
 
 
+def test_group_dashboard_supports_reordering_and_wide_layout() -> None:
+    html = render_index()
+
+    assert 'class="groups-table"' in html
+    assert "width: min(1720px, calc(100vw - 24px))" in html
+    assert 'data-action="move-group-up"' in html
+    assert 'data-action="move-group-down"' in html
+    assert 'api("/groups/order"' in html
+    assert "currentGroups = groups" in html
+
+
 def test_group_detail_warns_when_group_is_not_schedulable() -> None:
     html = render_index()
     manual_restart_warning = (

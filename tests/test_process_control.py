@@ -28,13 +28,18 @@ def test_terminate_process_group_force_kills_term_ignoring_child(tmp_path):
 
     process = subprocess.Popen(["bash", str(script)], start_new_session=True)
     try:
+        child_pid = None
         deadline = time.monotonic() + 5
-        while not child_pid_path.exists():
+        while child_pid is None:
             if time.monotonic() > deadline:
                 raise AssertionError("Timed out waiting for child process")
+            if child_pid_path.exists():
+                content = child_pid_path.read_text().strip()
+                if content:
+                    child_pid = int(content)
+                    break
             time.sleep(0.01)
 
-        child_pid = int(child_pid_path.read_text())
         assert os.getpgid(child_pid) == process.pid
 
         terminate_process_group(process.pid, grace_seconds=0.1)

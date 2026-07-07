@@ -42,7 +42,7 @@ def render_index() -> str:
     }
 
     .topbar {
-      width: min(1280px, calc(100vw - 32px));
+      width: min(1720px, calc(100vw - 24px));
       margin: 0 auto;
       padding: 18px 0;
       display: flex;
@@ -80,10 +80,10 @@ def render_index() -> str:
     }
 
     main {
-      width: min(1280px, calc(100vw - 32px));
+      width: min(1720px, calc(100vw - 24px));
       margin: 24px auto 40px;
       display: grid;
-      grid-template-columns: minmax(320px, 390px) minmax(0, 1fr);
+      grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
       gap: 20px;
       align-items: start;
     }
@@ -224,6 +224,16 @@ def render_index() -> str:
 
     .table-wrap { overflow-x: auto; }
 
+    .groups-table { min-width: 1240px; table-layout: fixed; }
+    .groups-table th:nth-child(1), .groups-table td:nth-child(1) { width: 122px; }
+    .groups-table th:nth-child(2), .groups-table td:nth-child(2) { width: 72px; }
+    .groups-table th:nth-child(3), .groups-table td:nth-child(3) { width: 132px; }
+    .groups-table th:nth-child(4), .groups-table td:nth-child(4) { width: 220px; }
+    .groups-table th:nth-child(5), .groups-table td:nth-child(5) { width: 300px; }
+    .groups-table th:nth-child(6), .groups-table td:nth-child(6) { width: 320px; }
+    .groups-table th:nth-child(7), .groups-table td:nth-child(7) { width: 170px; }
+    .groups-table th:nth-child(8), .groups-table td:nth-child(8) { width: 150px; }
+
     .history-block {
       border-top: 1px solid var(--border);
       margin-top: 4px;
@@ -261,6 +271,11 @@ def render_index() -> str:
       word-break: break-word;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
+    }
+
+    td.name-cell {
+      overflow-wrap: anywhere;
+      white-space: normal;
     }
 
     .badge {
@@ -392,9 +407,10 @@ def render_index() -> str:
         <h2>Task Groups</h2>
       </div>
       <div class="table-wrap">
-        <table>
+        <table class="groups-table">
           <thead>
             <tr>
+              <th>Order</th>
               <th>ID</th>
               <th>Status</th>
               <th>Name</th>
@@ -532,6 +548,7 @@ def render_index() -> str:
     const scheduleWarning = document.querySelector("#schedule-warning");
     let selectedGroup = null;
     let currentTasks = [];
+    let currentGroups = [];
 
     function showNotice(message, type = "") {
       notice.textContent = message;
@@ -623,17 +640,31 @@ def render_index() -> str:
     }
 
     function renderGroups(groups) {
+      currentGroups = groups;
       groupsBody.innerHTML = "";
       groupsEmpty.style.display = groups.length ? "none" : "block";
-      for (const group of groups) {
+      for (const [index, group] of groups.entries()) {
         const canDelete = group.status === "completed" || group.status === "empty"
           ? ""
           : "disabled";
+        const upDisabled = index > 0 ? "" : "disabled";
+        const downDisabled = index < groups.length - 1 ? "" : "disabled";
         const tr = document.createElement("tr");
         tr.innerHTML = `
+          <td>
+            <div class="task-actions">
+              <span>${index + 1}</span>
+              <button data-action="move-group-up" data-id="${group.id}" ${upDisabled}>Up</button>
+              <button
+                data-action="move-group-down"
+                data-id="${group.id}"
+                ${downDisabled}
+              >Down</button>
+            </div>
+          </td>
           <td>${group.id}</td>
           <td><span class="badge ${group.status}">${group.status}</span></td>
-          <td>${group.name}</td>
+          <td class="name-cell">${group.name}</td>
           <td>${groupCounts(group)}</td>
           <td class="current">${group.current_command || ""}</td>
           <td>${formatTime(group.latest_activity_at)}</td>
@@ -844,6 +875,25 @@ def render_index() -> str:
       showNotice("Task order updated.", "ok");
     }
 
+    async function saveGroupOrder(groups) {
+      await api("/groups/order", {
+        method: "PATCH",
+        body: JSON.stringify({ group_ids: groups.map((group) => group.id) }),
+      });
+      await refreshGroups();
+      await refreshSelectedGroup();
+    }
+
+    async function moveGroup(groupId, direction) {
+      const index = currentGroups.findIndex((group) => group.id === Number(groupId));
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= currentGroups.length) return;
+      const reordered = [...currentGroups];
+      [reordered[index], reordered[nextIndex]] = [reordered[nextIndex], reordered[index]];
+      await saveGroupOrder(reordered);
+      showNotice("Group order updated.", "ok");
+    }
+
     async function groupAction(event) {
       const button = event.target.closest("button[data-action]");
       if (!button || button.disabled) return;
@@ -853,6 +903,10 @@ def render_index() -> str:
           await openGroup(id);
         } else if (button.dataset.action === "delete-group") {
           await deleteGroup(id);
+        } else if (button.dataset.action === "move-group-up") {
+          await moveGroup(id, -1);
+        } else if (button.dataset.action === "move-group-down") {
+          await moveGroup(id, 1);
         }
       } catch (error) {
         showNotice(error.message, "error");

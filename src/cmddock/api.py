@@ -20,6 +20,7 @@ from cmddock.models import (
     SchedulerSnapshot,
     TaskGroupCreate,
     TaskGroupList,
+    TaskGroupOrderUpdate,
     TaskGroupRecord,
 )
 from cmddock.process_control import terminate_process_group
@@ -101,6 +102,17 @@ def build_app(settings: Settings) -> FastAPI:
         return {
             "groups": app_state.database.list_task_groups(include_archived=include_archived),
         }
+
+    @app.patch("/groups/order", response_model=TaskGroupList)
+    def reorder_groups(
+        payload: TaskGroupOrderUpdate,
+        app_state: AppState = state_dependency,
+    ) -> dict[str, list[dict]]:
+        try:
+            groups = app_state.database.reorder_task_groups(payload.group_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"groups": groups}
 
     @app.get("/groups/{group_id}", response_model=TaskGroupRecord)
     def get_group(

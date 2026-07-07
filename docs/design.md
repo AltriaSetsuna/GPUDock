@@ -22,7 +22,7 @@ GPUDock is a local scheduler for GPU-backed bash scripts. It constrains executio
 
 GPUDock keeps task groups and commands separate:
 
-- `task_groups`: group name, description, creation time, archive time, and execution state.
+- `task_groups`: unique group name, description, dashboard/scheduling position, creation time, archive time, and execution state.
 - `commands`: command text, `group_id`, `position`, lifecycle fields, GPU fields, log paths, and retry ordering.
 
 The old `queue` column from earlier versions is ignored if it exists in an upgraded database. New scheduling decisions use only `group_id`.
@@ -108,13 +108,14 @@ Selection and reservation happen together under a process-local lock. During mod
 
 The scheduler is group-aware:
 
-1. It looks for groups whose execution state is `running`.
-2. It skips any group that has an error command.
-3. It chooses the first pending command by `position` from each runnable group.
-4. If the command declares `GPU_COUNT`, it tries to reserve GPUs that satisfy that command's `min_idle_seconds`.
-5. If GPUs are insufficient, it requeues the command with `waiting_for_gpu`, skips that group for the current pass, and keeps scanning later groups.
-6. If the command has no `GPU_COUNT`, it skips GPU reservation.
-7. It launches selected commands in separate runner threads when their scheduling requirements are met.
+1. It scans groups by their explicit `task_groups.position` order.
+2. It looks for groups whose execution state is `running`.
+3. It skips any group that has an error command.
+4. It chooses the first pending command by `commands.position` from each runnable group.
+5. If the command declares `GPU_COUNT`, it tries to reserve GPUs that satisfy that command's `min_idle_seconds`.
+6. If GPUs are insufficient, it requeues the command with `waiting_for_gpu`, skips that group for the current pass, and keeps scanning later groups.
+7. If the command has no `GPU_COUNT`, it skips GPU reservation.
+8. It launches selected commands in separate runner threads when their scheduling requirements are met.
 
 This gives the desired behavior:
 
@@ -202,6 +203,7 @@ The dashboard is intentionally thin: it calls the same HTTP endpoints as externa
 
 - creating task groups;
 - viewing group summaries before command details;
+- moving task groups up or down to control dashboard order and scheduler priority;
 - opening a draft group to submit commands;
 - viewing queued/running/error commands separately from succeeded/canceled history;
 - moving pending commands up or down before the group starts; active queue order is renumbered from 1 and excludes succeeded/canceled commands;
@@ -253,3 +255,10 @@ Group-specific command views return planned execution order instead:
 - `GET /commands?group_id=...`
 
 In group views, the first command shown is the next command that should run.
+
+Task group views return explicit group order:
+
+- `GET /groups`
+
+The first group shown is the first group considered by the scheduler. `PATCH /groups/order`
+replaces that order with all active task group IDs.

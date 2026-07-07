@@ -40,6 +40,7 @@ class TaskGroupCreate(BaseModel):
 
 class TaskGroupRecord(BaseModel):
     id: int
+    position: int
     name: str
     description: str | None
     created_at: datetime
@@ -76,6 +77,10 @@ class CommandCreate(BaseModel):
 
 class CommandOrderUpdate(BaseModel):
     command_ids: list[int] = Field(min_length=1)
+
+
+class TaskGroupOrderUpdate(BaseModel):
+    group_ids: list[int] = Field(min_length=1)
 
 
 class CommandRecord(BaseModel):

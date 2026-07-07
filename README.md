@@ -5,6 +5,7 @@ GPUDock is a local GPU script scheduler for shared single-machine GPU servers. I
 The scheduling model is intentionally simple:
 
 - new task groups start in `draft`, so submitted commands do not run immediately;
+- task groups have an explicit dashboard order that also defines scheduling priority;
 - users arrange the group command order first, then start the whole group;
 - commands in the same task group run serially;
 - commands in different task groups can run in parallel;
@@ -19,6 +20,7 @@ The scheduling model is intentionally simple:
 - Reserve selected GPUs inside GPUDock until each launched task finishes.
 - Override the launched script environment with `CUDA_DEVICES=<ids>` and `GPU_COUNT=<n>` for GPU tasks.
 - Keep new task groups in a draft state until the user explicitly starts them.
+- Reorder task groups from the dashboard; higher groups are considered first by the scheduler.
 - Reorder pending commands inside a draft group; topmost commands run first.
 - Run each task group serially while scheduling different groups in parallel.
 - Show a task-group dashboard first, with command details inside each group.
@@ -82,6 +84,7 @@ The legacy `cmddock` entry point is still installed as an alias, but `gpudock` i
 The dashboard lets you:
 
 - create task groups;
+- move task groups up or down in the dashboard;
 - inspect group status, counts, current command, and latest activity;
 - open a draft group to submit absolute `.sh` script paths or env-prefixed bash launch commands;
 - view queued/running/error tasks separately from succeeded/canceled history;
@@ -196,6 +199,7 @@ execution order, with the first command shown at the top.
 ```http
 POST   /groups/{id}/start
 POST   /groups/{id}/pause
+PATCH  /groups/order
 PATCH  /groups/{id}/commands/order
 DELETE /groups/{id}
 POST   /commands/{id}/cancel
@@ -204,7 +208,7 @@ POST   /commands/{id}/kill
 GET    /commands/{id}/logs
 ```
 
-Task groups can be deleted only after every command in the group is `succeeded` or `canceled`.
+Task group names are unique. Task groups can be deleted only after every command in the group is `succeeded` or `canceled`.
 
 ## Email
 
