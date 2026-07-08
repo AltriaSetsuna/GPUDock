@@ -86,7 +86,7 @@ The dashboard lets you:
 - create task groups;
 - move task groups up or down in the dashboard;
 - inspect group status, counts, current command, and latest activity;
-- open a draft group to submit absolute `.sh` script paths or env-prefixed bash launch commands;
+- open a draft or completed group to submit absolute `.sh` script paths or env-prefixed bash launch commands;
 - view queued/running/error tasks separately from succeeded/canceled history;
 - move pending commands up or down before launch; active queue order starts at 1 and excludes succeeded/canceled tasks;
 - start a prepared task group only after its commands and order are final;
@@ -252,6 +252,8 @@ Important behavior:
 
 - Exit code `0` becomes `succeeded`.
 - New commands stay pending in a draft group until the group is started.
+- Completed groups can accept new commands; after submission, the group returns to `draft`
+  and must be started manually.
 - Pending commands can be reordered only while their task group is draft.
 - Non-zero self exit becomes `error` and blocks later commands in the same task group.
 - Retrying an error command moves it back to `pending`, pauses the task group, and requires a manual group start before scheduling.

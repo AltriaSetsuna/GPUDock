@@ -38,3 +38,4 @@ def test_group_detail_warns_when_group_is_not_schedulable() -> None:
     assert "This task group is paused. Pending commands will not be scheduled." in html
     assert manual_restart_warning in html
     assert 'group.execution_state === "draft" || group.execution_state === "paused"' in html
+    assert 'group.execution_state === "draft" || group.status === "completed"' in html

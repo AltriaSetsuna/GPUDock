@@ -84,6 +84,31 @@ def test_task_group_order_controls_scheduler_priority(tmp_path):
     assert second_claim["id"] == a_command["id"]
 
 
+def test_completed_task_group_accepts_new_commands_without_auto_starting(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    group = database.create_task_group("repeatable")
+    first = database.create_command("echo first", None, group_id=group["id"])
+    database.start_task_group(group["id"])
+    database.claim_next_pending_command()
+    database.mark_succeeded(first["id"], 0)
+
+    completed = database.get_task_group(group["id"])
+    second = database.create_command("echo second", None, group_id=group["id"])
+    reopened = database.get_task_group(group["id"])
+    blocked_claim = database.claim_next_pending_command()
+
+    assert completed["status"] == GroupStatus.COMPLETED
+    assert second["status"] == CommandStatus.PENDING
+    assert reopened["execution_state"] == GroupExecutionState.DRAFT
+    assert reopened["status"] == GroupStatus.DRAFT
+    assert blocked_claim is None
+
+    database.start_task_group(group["id"])
+    claimed = database.claim_next_pending_command()
+
+    assert claimed["id"] == second["id"]
+
+
 def test_draft_group_is_not_claimed_until_started(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     command = database.create_command("echo wait", None)

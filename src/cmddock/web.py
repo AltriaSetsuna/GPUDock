@@ -692,7 +692,9 @@ def render_index() -> str:
       );
       document.querySelector("#pause-group-button").disabled = group.execution_state !== "running";
       const submitButton = submitForm.querySelector("button[type='submit']");
-      submitButton.disabled = group.execution_state !== "draft";
+      submitButton.disabled = !(
+        group.execution_state === "draft" || group.status === "completed"
+      );
       document.querySelector("#delete-group-button").disabled = !(
         group.status === "completed" || group.status === "empty"
       );

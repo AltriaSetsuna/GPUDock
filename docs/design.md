@@ -204,7 +204,7 @@ The dashboard is intentionally thin: it calls the same HTTP endpoints as externa
 - creating task groups;
 - viewing group summaries before command details;
 - moving task groups up or down to control dashboard order and scheduler priority;
-- opening a draft group to submit commands;
+- opening a draft or completed group to submit commands;
 - viewing queued/running/error commands separately from succeeded/canceled history;
 - moving pending commands up or down before the group starts; active queue order is renumbered from 1 and excludes succeeded/canceled commands;
 - starting a prepared group;
@@ -255,6 +255,10 @@ Group-specific command views return planned execution order instead:
 - `GET /commands?group_id=...`
 
 In group views, the first command shown is the next command that should run.
+
+Completed groups can be reopened by adding a new command. GPUDock moves the group back
+to `draft`, so the newly submitted command is not scheduled until the user starts the
+group again.
 
 Task group views return explicit group order:
 
