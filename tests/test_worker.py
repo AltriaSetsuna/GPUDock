@@ -4,6 +4,7 @@ import time
 
 from cmddock.database import Database
 from cmddock.gpu import GPUReservation, GPUSchedulingError
+from cmddock.hosts import GPUHostConfig, HostConfig, RemoteEnvBinding
 from cmddock.models import CommandStatus
 from cmddock.worker import CommandRunner, GroupScheduler
 
@@ -147,6 +148,119 @@ def test_command_runner_passes_submission_env_overrides(tmp_path, monkeypatch):
     assert launched is True
     assert database.get_command(record["id"])["status"] == CommandStatus.SUCCEEDED
     assert (logs_dir / f"{record['id']}.stdout.log").read_text() == "/home/data.json|3|1"
+
+
+def test_command_runner_reserves_remote_gpu_but_runs_script_locally(tmp_path, monkeypatch):
+    database = Database(tmp_path / "cmddock.db")
+    logs_dir = tmp_path / "logs"
+    reserve_calls = []
+    release_calls = []
+    launched_envs = []
+
+    def reserve_remote(gpu_count, **kwargs):
+        reserve_calls.append((gpu_count, kwargs))
+        return GPUReservation([1, 2], [1, 2, 3], "node1_vp")
+
+    class Process:
+        pid = 12345
+
+    def launch_local(script_path, cwd, stdout_path, stderr_path, env):
+        launched_envs.append(env.copy())
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout_path.write_text("launched")
+        return Process()
+
+    monkeypatch.setattr("cmddock.worker.reserve_idle_gpus", reserve_remote)
+    def release_remote(gpu_ids, **kwargs):
+        release_calls.append((gpu_ids, kwargs))
+
+    class Result:
+        exit_code = 0
+        killed = False
+
+    monkeypatch.setattr("cmddock.worker.release_reserved_gpus", release_remote)
+    monkeypatch.setattr("cmddock.worker.start_command_process", launch_local)
+    monkeypatch.setattr("cmddock.worker.wait_for_process", lambda process: Result())
+    monkeypatch.setattr("cmddock.worker.send_launch_email_async", lambda **kwargs: None)
+
+    script = _write_script(tmp_path, "remote.sh", 'printf "%s" "$CUDA_DEVICES"')
+    record = database.create_command(f"VLLM_TARGET=node1_vp GPU_COUNT=2 bash {script}", None)
+    database.start_task_group(record["group_id"])
+    claimed = database.claim_next_pending_command()
+    gpu_host_config = GPUHostConfig(
+        hosts={"node1_vp": HostConfig(name="node1_vp", hostname="10.75.76.2")},
+        remote_env_bindings=(RemoteEnvBinding(env_name="VLLM_TARGET"),),
+    )
+
+    launched = CommandRunner(database, logs_dir, gpu_host_config).run_one(claimed)
+    command_record = database.get_command(record["id"])
+
+    assert launched is True
+    assert reserve_calls[0][0] == 2
+    assert reserve_calls[0][1]["resource_id"] == "node1_vp"
+    assert reserve_calls[0][1]["host_config"].hostname == "10.75.76.2"
+    assert launched_envs[0]["CUDA_DEVICES"] == "1,2"
+    assert launched_envs[0]["GPU_COUNT"] == "2"
+    assert launched_envs[0]["VLLM_TARGET"] == "node1_vp"
+    assert command_record["status"] == CommandStatus.SUCCEEDED
+    assert command_record["gpu_resource"] == "node1_vp"
+    assert command_record["assigned_gpu_ids"] is None
+    assert release_calls == [([1, 2], {"resource_id": "node1_vp"})]
+
+
+def test_command_runner_uses_vllm_config_default_for_remote_gpu(tmp_path, monkeypatch):
+    database = Database(tmp_path / "cmddock.db")
+    logs_dir = tmp_path / "logs"
+    reserve_calls = []
+
+    def reserve_remote(gpu_count, **kwargs):
+        reserve_calls.append((gpu_count, kwargs))
+        return GPUReservation([6, 7], [6, 7], "node1")
+
+    class Process:
+        pid = 12345
+
+    class Result:
+        exit_code = 0
+        killed = False
+
+    agent_dir = tmp_path / "agent"
+    script_dir = agent_dir / "scripts" / "qwen"
+    config_dir = agent_dir / "config"
+    script_dir.mkdir(parents=True)
+    config_dir.mkdir()
+    script = script_dir / "fix.sh"
+    script.write_text(
+        'export GPU_COUNT=2\n'
+        'readonly VLLM_HOST_CONFIG="${VLLM_HOST_CONFIG:-${AGENT_DIR}/config/vllm_hosts.env}"\n'
+        'vllm_configure_target "${VLLM_HOST_CONFIG}"\n',
+    )
+    (config_dir / "vllm_hosts.env").write_text(
+        "VLLM_TARGET_DEFAULT=node1\n"
+        "VLLM_NODE1_HOST=10.75.76.2\n"
+        "VLLM_NODE1_USER=yijiali\n"
+        "VLLM_NODE1_SSH_KEY=/home/yijiali/.ssh/node1_rsa\n",
+    )
+
+    monkeypatch.setattr("cmddock.worker.reserve_idle_gpus", reserve_remote)
+    monkeypatch.setattr("cmddock.worker.release_reserved_gpus", lambda gpu_ids, **kwargs: None)
+    monkeypatch.setattr("cmddock.worker.start_command_process", lambda *args, **kwargs: Process())
+    monkeypatch.setattr("cmddock.worker.wait_for_process", lambda process: Result())
+    monkeypatch.setattr("cmddock.worker.send_launch_email_async", lambda **kwargs: None)
+
+    record = database.create_command(str(script), None)
+    database.start_task_group(record["group_id"])
+    claimed = database.claim_next_pending_command()
+
+    launched = CommandRunner(database, logs_dir).run_one(claimed)
+    command_record = database.get_command(record["id"])
+
+    assert launched is True
+    assert reserve_calls[0][0] == 2
+    assert reserve_calls[0][1]["resource_id"] == "node1"
+    assert reserve_calls[0][1]["host_config"].hostname == "10.75.76.2"
+    assert command_record["gpu_resource"] == "node1"
+    assert command_record["status"] == CommandStatus.SUCCEEDED
 
 
 def test_command_runner_runs_non_gpu_script_without_reservation(tmp_path, monkeypatch):

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+- Added multi-host GPU monitoring through `.cmddock/gpu_hosts.conf`.
+- Added SSH-based remote `nvidia-smi` polling while keeping submitted scripts running locally.
+- Added `RemoteEnv` config support so variables such as `VLLM_TARGET` can select remote GPU hosts.
+- Added per-resource GPU idle tracking and reservations such as `local:0` and `node1:0`.
+- Added `gpu_resource` persistence and API output for scheduled commands.
+- Added fail-closed remote GPU target resolution for vLLM defaults, including `config/vllm_hosts.env` support.
+- Added a local default `.cmddock/gpu_hosts.conf` for `node1` and `VLLM_TARGET`.
+- Removed hardcoded email addresses and SMTP credentials from code and docs.
+- Updated the dashboard, README, design docs, and tests for remote GPU scheduling.
+
 ## 0.4.0
 
 - Replaced user-facing `serial` / `parallel` queues with task groups.

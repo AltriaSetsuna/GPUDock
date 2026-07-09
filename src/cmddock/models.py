@@ -98,6 +98,7 @@ class CommandRecord(BaseModel):
     exit_status: str | None
     pid: int | None
     gpu_count: int | None
+    gpu_resource: str
     min_idle_seconds: int
     assigned_gpu_ids: str | None
     stdout_path: str | None

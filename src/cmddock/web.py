@@ -226,13 +226,12 @@ def render_index() -> str:
 
     .groups-table { min-width: 1240px; table-layout: fixed; }
     .groups-table th:nth-child(1), .groups-table td:nth-child(1) { width: 122px; }
-    .groups-table th:nth-child(2), .groups-table td:nth-child(2) { width: 72px; }
-    .groups-table th:nth-child(3), .groups-table td:nth-child(3) { width: 132px; }
-    .groups-table th:nth-child(4), .groups-table td:nth-child(4) { width: 220px; }
-    .groups-table th:nth-child(5), .groups-table td:nth-child(5) { width: 300px; }
-    .groups-table th:nth-child(6), .groups-table td:nth-child(6) { width: 320px; }
-    .groups-table th:nth-child(7), .groups-table td:nth-child(7) { width: 170px; }
-    .groups-table th:nth-child(8), .groups-table td:nth-child(8) { width: 150px; }
+    .groups-table th:nth-child(2), .groups-table td:nth-child(2) { width: 132px; }
+    .groups-table th:nth-child(3), .groups-table td:nth-child(3) { width: 220px; }
+    .groups-table th:nth-child(4), .groups-table td:nth-child(4) { width: 300px; }
+    .groups-table th:nth-child(5), .groups-table td:nth-child(5) { width: 320px; }
+    .groups-table th:nth-child(6), .groups-table td:nth-child(6) { width: 170px; }
+    .groups-table th:nth-child(7), .groups-table td:nth-child(7) { width: 150px; }
 
     .history-block {
       border-top: 1px solid var(--border);
@@ -411,7 +410,6 @@ def render_index() -> str:
           <thead>
             <tr>
               <th>Order</th>
-              <th>ID</th>
               <th>Status</th>
               <th>Name</th>
               <th>Counts</th>
@@ -476,7 +474,6 @@ def render_index() -> str:
         <table>
           <thead>
             <tr>
-              <th>ID</th>
               <th>Order</th>
               <th>Status</th>
               <th>GPU</th>
@@ -498,7 +495,6 @@ def render_index() -> str:
           <table>
             <thead>
               <tr>
-                <th>ID</th>
                 <th>Status</th>
                 <th>GPU</th>
                 <th>Idle</th>
@@ -562,7 +558,7 @@ def render_index() -> str:
 
     function taskGpu(task) {
       if (task.assigned_gpu_ids) return task.assigned_gpu_ids;
-      if (task.gpu_count) return `needs ${task.gpu_count}`;
+      if (task.gpu_count) return `${task.gpu_resource || "local"}: needs ${task.gpu_count}`;
       return "non-GPU";
     }
 
@@ -662,7 +658,6 @@ def render_index() -> str:
               >Down</button>
             </div>
           </td>
-          <td>${group.id}</td>
           <td><span class="badge ${group.status}">${group.status}</span></td>
           <td class="name-cell">${group.name}</td>
           <td>${groupCounts(group)}</td>
@@ -682,7 +677,7 @@ def render_index() -> str:
     }
 
     function renderDetailHeader(group) {
-      document.querySelector("#detail-name").textContent = `${group.name} (#${group.id})`;
+      document.querySelector("#detail-name").textContent = group.name;
       const state = group.execution_state || group.status;
       document.querySelector("#detail-description").textContent =
         `${state}${group.description ? ` - ${group.description}` : ""}`;
@@ -735,7 +730,6 @@ def render_index() -> str:
         const downDisabled = canMove && pendingIndex < pendingTasks.length - 1 ? "" : "disabled";
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${task.id}</td>
           <td>
             <div class="task-actions">
               <span>${index + 1}</span>
@@ -764,7 +758,6 @@ def render_index() -> str:
       for (const task of historyTasks) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td>${task.id}</td>
           <td><span class="badge ${task.status}">${task.status}</span></td>
           <td>${taskGpu(task)}</td>
           <td>${taskIdle(task)}</td>
@@ -816,7 +809,7 @@ def render_index() -> str:
           method: "POST",
           body: JSON.stringify(payload),
         });
-        showNotice(`Task ${task.id} submitted to ${selectedGroup.name}.`, "ok");
+        showNotice(`Task submitted to ${selectedGroup.name}.`, "ok");
         submitForm.reset();
         await refreshSelectedGroup();
       } catch (error) {
@@ -834,7 +827,7 @@ def render_index() -> str:
 
     async function deleteGroup(groupId) {
       await api(`/groups/${groupId}`, { method: "DELETE" });
-      showNotice(`Group ${groupId} deleted.`, "ok");
+      showNotice("Group deleted.", "ok");
       if (selectedGroup && selectedGroup.id === Number(groupId)) {
         selectedGroup = null;
         detailSection.classList.add("hidden");
@@ -845,14 +838,14 @@ def render_index() -> str:
 
     async function startGroup(groupId) {
       await api(`/groups/${groupId}/start`, { method: "POST" });
-      showNotice(`Group ${groupId} started.`, "ok");
+      showNotice("Group started.", "ok");
       await refreshGroups();
       await refreshSelectedGroup();
     }
 
     async function pauseGroup(groupId) {
       await api(`/groups/${groupId}/pause`, { method: "POST" });
-      showNotice(`Group ${groupId} paused.`, "ok");
+      showNotice("Group paused.", "ok");
       await refreshGroups();
       await refreshSelectedGroup();
     }
@@ -923,7 +916,7 @@ def render_index() -> str:
       try {
         if (action === "logs") {
           const logs = await api(`/commands/${id}/logs`);
-          document.querySelector("#logs-title").textContent = `Task ${id} Logs`;
+          document.querySelector("#logs-title").textContent = "Task Logs";
           document.querySelector("#stdout").textContent = logs.stdout || "";
           document.querySelector("#stderr").textContent = logs.stderr || "";
           logsModal.classList.add("show");
@@ -938,7 +931,7 @@ def render_index() -> str:
           return;
         }
         await api(`/commands/${id}/${action}`, { method: "POST" });
-        showNotice(`Task ${id} ${action} requested.`, "ok");
+        showNotice(`Task ${action} requested.`, "ok");
         await refreshSelectedGroup();
       } catch (error) {
         showNotice(error.message, "error");

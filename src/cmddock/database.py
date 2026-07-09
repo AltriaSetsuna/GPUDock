@@ -68,6 +68,7 @@ class Database:
                     exit_status TEXT,
                     pid INTEGER,
                     gpu_count INTEGER,
+                    gpu_resource TEXT NOT NULL DEFAULT 'local',
                     min_idle_seconds INTEGER NOT NULL DEFAULT 120,
                     assigned_gpu_ids TEXT,
                     stdout_path TEXT,
@@ -95,6 +96,12 @@ class Database:
             self._ensure_column(conn, "commands", "position", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "commands", "pid", "INTEGER")
             self._ensure_column(conn, "commands", "gpu_count", "INTEGER")
+            self._ensure_column(
+                conn,
+                "commands",
+                "gpu_resource",
+                "TEXT NOT NULL DEFAULT 'local'",
+            )
             self._ensure_column(
                 conn,
                 "commands",
@@ -348,6 +355,7 @@ class Database:
         cwd: str | None,
         group_id: int | None = None,
         gpu_count: int | None = None,
+        gpu_resource: str = "local",
         group_name: str | None = None,
         min_idle_seconds: int | None = DEFAULT_MIN_IDLE_SECONDS,
     ) -> dict[str, Any]:
@@ -385,9 +393,9 @@ class Database:
                 """
                 INSERT INTO commands (
                     group_id, position, command, cwd, status, submitted_at, gpu_count,
-                    min_idle_seconds, run_after_id
+                    gpu_resource, min_idle_seconds, run_after_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     group_id,
@@ -397,6 +405,7 @@ class Database:
                     CommandStatus.PENDING,
                     submitted_at,
                     gpu_count,
+                    gpu_resource,
                     normalized_min_idle_seconds,
                 ),
             )
@@ -789,11 +798,16 @@ class Database:
                 (pid, command_id, CommandStatus.RUNNING),
             )
 
-    def set_gpu_requirement(self, command_id: int, gpu_count: int | None) -> None:
+    def set_gpu_requirement(
+        self,
+        command_id: int,
+        gpu_count: int | None,
+        gpu_resource: str = "local",
+    ) -> None:
         with self._lock, self.connect() as conn:
             conn.execute(
-                "UPDATE commands SET gpu_count = ? WHERE id = ?",
-                (gpu_count, command_id),
+                "UPDATE commands SET gpu_count = ?, gpu_resource = ? WHERE id = ?",
+                (gpu_count, gpu_resource, command_id),
             )
 
     def set_assigned_gpu_ids(self, command_id: int, assigned_gpu_ids: str) -> None:
@@ -947,6 +961,7 @@ class Database:
             "exit_status": row["exit_status"],
             "pid": row["pid"],
             "gpu_count": row["gpu_count"],
+            "gpu_resource": row["gpu_resource"],
             "min_idle_seconds": row["min_idle_seconds"],
             "assigned_gpu_ids": row["assigned_gpu_ids"],
             "stdout_path": row["stdout_path"],

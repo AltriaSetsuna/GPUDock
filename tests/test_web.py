@@ -39,3 +39,14 @@ def test_group_detail_warns_when_group_is_not_schedulable() -> None:
     assert manual_restart_warning in html
     assert 'group.execution_state === "draft" || group.execution_state === "paused"' in html
     assert 'group.execution_state === "draft" || group.status === "completed"' in html
+
+
+def test_dashboard_does_not_show_group_or_task_ids() -> None:
+    html = render_index()
+
+    assert "<th>ID</th>" not in html
+    assert "<td>${group.id}</td>" not in html
+    assert "<td>${task.id}</td>" not in html
+    assert "(#${group.id})" not in html
+    assert "Task ${id} Logs" not in html
+    assert "Task ${task.id} submitted" not in html

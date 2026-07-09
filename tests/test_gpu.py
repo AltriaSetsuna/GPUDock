@@ -7,13 +7,18 @@ from cmddock.gpu import (
     GPUSchedulingError,
     GPUStatus,
     StableIdleGPUTracker,
+    get_gpu_memory_status,
     parse_gpu_count,
     parse_submission_command,
+    parse_submission_environment,
     release_reserved_gpus,
     reserve_idle_gpus,
+    resolve_gpu_resource,
+    resolve_gpu_target,
     select_idle_gpus,
     validate_script_path,
 )
+from cmddock.hosts import GPUHostConfig, HostConfig, parse_gpu_host_config
 
 
 def test_validate_script_path_requires_absolute_sh_path(tmp_path):
@@ -89,6 +94,139 @@ def test_parse_gpu_count_treats_missing_definition_as_non_gpu_task(tmp_path):
     script.write_text("echo missing\n")
 
     assert parse_gpu_count(str(script)) is None
+
+
+def test_parse_submission_environment_prefers_command_env_over_script(tmp_path):
+    script = tmp_path / "task.sh"
+    script.write_text('export VLLM_TARGET="node1_vp"\nDATA_PATH=/script.json\n')
+
+    env = parse_submission_environment(f"DATA_PATH=/command.json bash {script}")
+
+    assert env["VLLM_TARGET"] == "node1_vp"
+    assert env["DATA_PATH"] == "/command.json"
+
+
+def test_resolve_gpu_resource_uses_vllm_target_host_alias(tmp_path):
+    script = tmp_path / "task.sh"
+    script.write_text("export GPU_COUNT=1\n")
+    config = parse_gpu_host_config(
+        """
+        Host node1_vp
+          HostName 10.75.76.2
+          User yijiali
+          Port 22
+          IdentityFile ~/.ssh/node1_rsa
+
+        RemoteEnv VLLM_TARGET
+        """
+    )
+
+    resource = resolve_gpu_resource(f"VLLM_TARGET=node1_vp bash {script}", config)
+
+    assert resource == "node1_vp"
+
+
+def test_resolve_gpu_resource_can_use_explicit_env_mapping(tmp_path):
+    script = tmp_path / "task.sh"
+    script.write_text("export VLLM_TARGET=serve-a\n")
+    config = parse_gpu_host_config(
+        """
+        Host node1_vp
+          HostName 10.75.76.2
+
+        RemoteEnv VLLM_TARGET serve-a node1_vp
+        """
+    )
+
+    assert resolve_gpu_resource(str(script), config) == "node1_vp"
+
+
+def test_parse_submission_environment_reads_referenced_vllm_config(tmp_path):
+    agent_dir = tmp_path / "agent"
+    script_dir = agent_dir / "scripts" / "qwen"
+    config_dir = agent_dir / "config"
+    script_dir.mkdir(parents=True)
+    config_dir.mkdir()
+    script = script_dir / "fix.sh"
+    script.write_text(
+        'readonly VLLM_HOST_CONFIG="${VLLM_HOST_CONFIG:-${AGENT_DIR}/config/vllm_hosts.env}"\n'
+        'vllm_configure_target "${VLLM_HOST_CONFIG}"\n',
+    )
+    (config_dir / "vllm_hosts.env").write_text(
+        "VLLM_TARGET_DEFAULT=node1\n"
+        "VLLM_NODE1_HOST=10.75.76.2\n"
+        "VLLM_NODE1_USER=yijiali\n"
+        "VLLM_NODE1_SSH_KEY=/home/yijiali/.ssh/node1_rsa\n",
+    )
+
+    env = parse_submission_environment(f"GPU_COUNT=2 bash {script}")
+
+    assert env["VLLM_TARGET_DEFAULT"] == "node1"
+    assert env["VLLM_NODE1_HOST"] == "10.75.76.2"
+
+
+def test_resolve_gpu_target_uses_vllm_default_without_host_config(tmp_path):
+    agent_dir = tmp_path / "agent"
+    script_dir = agent_dir / "scripts" / "qwen"
+    config_dir = agent_dir / "config"
+    script_dir.mkdir(parents=True)
+    config_dir.mkdir()
+    script = script_dir / "fix.sh"
+    script.write_text(
+        'export GPU_COUNT=2\n'
+        'readonly VLLM_HOST_CONFIG="${VLLM_HOST_CONFIG:-${AGENT_DIR}/config/vllm_hosts.env}"\n'
+        'vllm_configure_target "${VLLM_HOST_CONFIG}"\n',
+    )
+    (config_dir / "vllm_hosts.env").write_text(
+        "VLLM_TARGET_DEFAULT=node1\n"
+        "VLLM_NODE1_HOST=10.75.76.2\n"
+        "VLLM_NODE1_USER=yijiali\n"
+        "VLLM_NODE1_SSH_KEY=/home/yijiali/.ssh/node1_rsa\n",
+    )
+
+    target = resolve_gpu_target(str(script), GPUHostConfig(hosts={}, remote_env_bindings=()))
+
+    assert target.resource_id == "node1"
+    assert target.host_config is not None
+    assert target.host_config.hostname == "10.75.76.2"
+    assert target.host_config.user == "yijiali"
+
+
+def test_get_gpu_memory_status_queries_remote_host(tmp_path, monkeypatch):
+    captured_cmd = []
+
+    def fake_check_output(cmd, text):
+        captured_cmd.extend(cmd)
+        assert text is True
+        return "0, 0, 1000\n1, 900, 1000\n"
+
+    monkeypatch.setattr("cmddock.gpu.subprocess.check_output", fake_check_output)
+
+    statuses = get_gpu_memory_status(
+        resource_id="node1_vp",
+        host_config=HostConfig(
+            name="node1_vp",
+            hostname="10.75.76.2",
+            user="yijiali",
+            port=22,
+            identity_file=tmp_path / "node1_rsa",
+        ),
+    )
+
+    assert captured_cmd[:6] == [
+        "ssh",
+        "-p",
+        "22",
+        "-i",
+        str(tmp_path / "node1_rsa"),
+        "yijiali@10.75.76.2",
+    ]
+    assert captured_cmd[-3:] == [
+        "nvidia-smi",
+        "--query-gpu=index,memory.used,memory.total",
+        "--format=csv,noheader,nounits",
+    ]
+    assert [status.gpu_id for status in statuses] == [0, 1]
 
 
 def test_select_idle_gpus_requires_stable_low_memory_for_120_seconds(monkeypatch):

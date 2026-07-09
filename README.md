@@ -1,6 +1,6 @@
 # GPUDock
 
-GPUDock is a local GPU script scheduler for shared single-machine GPU servers. It accepts validated bash script launches, waits until enough GPUs have stayed below 1% memory usage for the task's required idle window when a task declares `GPU_COUNT`, injects `CUDA_DEVICES` and `GPU_COUNT` for GPU tasks, and runs tasks through task groups.
+GPUDock is a local GPU script scheduler for shared GPU environments. It accepts validated bash script launches, waits until enough GPUs have stayed below 1% memory usage for the task's required idle window when a task declares `GPU_COUNT`, injects `CUDA_DEVICES` and `GPU_COUNT` for GPU tasks, and runs tasks through task groups. Commands always run on the local machine; GPUDock can also monitor remote GPU hosts when a local command is expected to use GPUs through a remote service such as vLLM.
 
 The scheduling model is intentionally simple:
 
@@ -16,8 +16,9 @@ The scheduling model is intentionally simple:
 - Accept only absolute `.sh` bash script paths, with optional `KEY=value` prefixes.
 - Read optional `GPU_COUNT` from the submitted command first, then from the script.
 - Run commands without `GPU_COUNT` as ordinary non-GPU tasks.
+- Monitor local GPUs by default, or remote GPU hosts selected by configured environment variables such as `VLLM_TARGET`.
 - Use only GPUs whose memory usage stays below 1% for each task's `min_idle_seconds`.
-- Reserve selected GPUs inside GPUDock until each launched task finishes.
+- Reserve selected GPUs inside GPUDock per GPU resource, for example `local:0` or `node1:0`, until each launched task finishes.
 - Override the launched script environment with `CUDA_DEVICES=<ids>` and `GPU_COUNT=<n>` for GPU tasks.
 - Keep new task groups in a draft state until the user explicitly starts them.
 - Reorder task groups from the dashboard; higher groups are considered first by the scheduler.
@@ -75,6 +76,40 @@ gpudock logs 1
 gpudock kill 1
 ```
 
+## Multi-Host GPU Monitoring
+
+By default, GPUDock monitors local GPUs. If a local command uses a remote GPU service, configure remote GPU hosts in `.cmddock/gpu_hosts.conf` or pass a custom file with `--gpu-hosts-config`:
+
+```text
+Host node1
+  HostName 10.75.76.2
+  User yijiali
+  Port 22
+  IdentityFile ~/.ssh/node1_rsa
+
+RemoteEnv VLLM_TARGET
+```
+
+`RemoteEnv VLLM_TARGET` means GPUDock treats the value of `VLLM_TARGET` as a configured host alias. This command still launches locally, but GPUDock checks and reserves GPUs on `node1`:
+
+```bash
+VLLM_TARGET=node1 GPU_COUNT=2 bash /absolute/path/to/run_vllm_eval.sh
+```
+
+You can also map a specific environment value to a host alias:
+
+```text
+Host node1
+  HostName 10.75.76.2
+  User yijiali
+
+RemoteEnv VLLM_TARGET serve-a node1
+```
+
+Then `VLLM_TARGET=serve-a bash /absolute/path/to/job.sh` monitors `node1`. GPUDock reads environment assignments from the submitted command first, then static assignments in the script, and can also read vLLM target defaults from a referenced `config/vllm_hosts.env`. If no configured remote environment variable is present, the task uses `local`.
+
+Remote GPU polling uses SSH only for `nvidia-smi`; script execution remains local.
+
 The legacy `cmddock` entry point is still installed as an alias, but `gpudock` is the preferred command.
 
 ## Visual Dashboard
@@ -103,7 +138,7 @@ http://127.0.0.1:8765/ui
 
 ## Scheduling
 
-GPUDock polls GPU memory with:
+GPUDock polls GPU memory on the selected GPU resource with:
 
 ```bash
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits
@@ -117,7 +152,7 @@ continuous idle window. The default is 120 seconds, and each task may set
 memory.used / memory.total < 0.01
 ```
 
-When GPUDock assigns GPUs to a task, those GPU IDs are reserved in the scheduler process until that task exits. Concurrent task-group launches therefore cannot all observe the same briefly idle GPU during model startup and launch onto it at the same time.
+When GPUDock assigns GPUs to a task, those GPU IDs are reserved in the scheduler process until that task exits. Reservations are keyed by resource, so `local:0` and `node1:0` are independent GPUs. Concurrent task-group launches therefore cannot all observe the same briefly idle GPU during model startup and launch onto it at the same time.
 
 When the scheduler looks for work:
 
@@ -125,13 +160,14 @@ When the scheduler looks for work:
 2. It skips groups with a running command.
 3. It skips groups blocked by an error command.
 4. It takes only the top pending command from each runnable group.
-5. If the command declares `GPU_COUNT`, it checks for enough unreserved GPUs that stayed below 1% memory usage for that task's `min_idle_seconds`.
-6. If that group does not have enough GPUs, the task returns to `pending` with `waiting_for_gpu`, and GPUDock keeps scanning later task groups in the same scheduler pass.
-7. If the command does not declare `GPU_COUNT`, it is treated as an ordinary non-GPU task and launches without GPU reservation.
-8. It launches the script with `bash`.
-9. For GPU tasks, it injects `CUDA_DEVICES` and overrides `GPU_COUNT`.
-10. It sends a startup email after the process starts.
-11. When the task exits, is killed, or fails to launch, GPUDock releases the reservation.
+5. It resolves the GPU resource from configured remote environment variables, or uses `local`.
+6. If the command declares `GPU_COUNT`, it checks for enough unreserved GPUs on that resource that stayed below 1% memory usage for that task's `min_idle_seconds`.
+7. If that group does not have enough GPUs, the task returns to `pending` with `waiting_for_gpu`, and GPUDock keeps scanning later task groups in the same scheduler pass.
+8. If the command does not declare `GPU_COUNT`, it is treated as an ordinary non-GPU task and launches without GPU reservation.
+9. It launches the script with `bash` on the local machine.
+10. For GPU tasks, it injects local ordinal `CUDA_DEVICES` values for the selected resource and overrides `GPU_COUNT`.
+11. It sends a startup email after the process starts.
+12. When the task exits, is killed, or fails to launch, GPUDock releases the reservation.
 
 This is work-conserving: if group `B` needs more GPUs than are currently available but group `C` can run, GPUDock skips `B` for that pass and starts `C` instead of leaving GPUs idle.
 
@@ -167,6 +203,14 @@ With a longer idle window:
 curl -X POST http://127.0.0.1:8765/commands \
   -H 'content-type: application/json' \
   -d '{"group_name": "qwen-sweep", "command": "GPU_COUNT=2 bash /absolute/path/to/train.sh", "min_idle_seconds": 300}'
+```
+
+For remote GPU monitoring through `VLLM_TARGET`:
+
+```bash
+curl -X POST http://127.0.0.1:8765/commands \
+  -H 'content-type: application/json' \
+  -d '{"group_name": "qwen-sweep", "command": "VLLM_TARGET=node1 GPU_COUNT=2 bash /absolute/path/to/run_eval.sh"}'
 ```
 
 ### Arrange and start a task group
@@ -212,18 +256,7 @@ Task group names are unique. Task groups can be deleted only after every command
 
 ## Email
 
-Startup email behavior follows `/home/yijiali/python.py`.
-
-Defaults:
-
-```text
-receiver: 1744141921@qq.com
-sender:   1744141921@qq.com
-server:   smtp.qq.com
-port:     465
-```
-
-You can override them with environment variables:
+Startup email behavior follows `/home/yijiali/python.py`, but credentials and addresses are never hardcoded. Configure email with environment variables:
 
 ```bash
 export GPUDOCK_EMAIL_RECEIVER="you@example.com"
@@ -233,7 +266,7 @@ export GPUDOCK_SMTP_SERVER="smtp.qq.com"
 export GPUDOCK_SMTP_PORT="465"
 ```
 
-If receiver, sender, or password is missing, email is skipped.
+If receiver, sender, password, or SMTP server is missing, email is skipped.
 
 ## Lifecycle
 
@@ -278,7 +311,7 @@ ruff check --no-cache .
 
 ## Version
 
-Current version: `0.4.0`
+Current version: `0.5.0`
 
 ## License
 

@@ -11,11 +11,14 @@ from cmddock.emailer import send_launch_email_async
 from cmddock.gpu import (
     GPUReservation,
     GPUSchedulingError,
+    format_gpu_labels,
     parse_gpu_count,
     parse_submission_command,
     release_reserved_gpus,
     reserve_idle_gpus,
+    resolve_gpu_target,
 )
+from cmddock.hosts import LOCAL_RESOURCE, GPUHostConfig
 from cmddock.models import CommandStatus
 from cmddock.runner import start_command_process, wait_for_process
 from cmddock.scheduling import normalize_min_idle_seconds
@@ -34,9 +37,15 @@ class PreparedCommand:
 
 
 class CommandRunner:
-    def __init__(self, database: Database, logs_dir: Path) -> None:
+    def __init__(
+        self,
+        database: Database,
+        logs_dir: Path,
+        gpu_host_config: GPUHostConfig | None = None,
+    ) -> None:
         self.database = database
         self.logs_dir = logs_dir
+        self.gpu_host_config = gpu_host_config or GPUHostConfig(hosts={}, remote_env_bindings=())
 
     def run_one(self, command: dict) -> bool:
         prepared = self.prepare(command)
@@ -55,10 +64,17 @@ class CommandRunner:
             parsed = parse_submission_command(command_text)
             script_path = str(parsed.script_path)
             gpu_count = parse_gpu_count(command_text)
-            self.database.set_gpu_requirement(command_id, gpu_count)
+            gpu_target = resolve_gpu_target(command_text, self.gpu_host_config)
+            gpu_resource = gpu_target.resource_id
+            self.database.set_gpu_requirement(command_id, gpu_count, gpu_resource)
             min_idle_seconds = normalize_min_idle_seconds(command.get("min_idle_seconds"))
             reservation = (
-                reserve_idle_gpus(gpu_count, stability_seconds=min_idle_seconds)
+                reserve_idle_gpus(
+                    gpu_count,
+                    stability_seconds=min_idle_seconds,
+                    resource_id=gpu_resource,
+                    host_config=gpu_target.host_config,
+                )
                 if gpu_count is not None
                 else None
             )
@@ -97,7 +113,11 @@ class CommandRunner:
                 return True
 
             idle_gpus = reservation.idle_gpu_ids if reservation is not None else []
-            assigned_gpu_ids = ",".join(str(gpu_id) for gpu_id in selected_gpus) or None
+            assigned_gpu_ids = (
+                format_gpu_labels(reservation.resource_id, selected_gpus)
+                if reservation is not None
+                else None
+            )
             process = self.database.start_process_if_running(
                 command_id,
                 assigned_gpu_ids,
@@ -117,6 +137,7 @@ class CommandRunner:
                 selected_gpus=selected_gpus,
                 idle_gpus=idle_gpus,
                 command_id=command_id,
+                gpu_resource=reservation.resource_id if reservation is not None else LOCAL_RESOURCE,
             )
             result = wait_for_process(process)
         except Exception as exc:  # noqa: BLE001 - runner failures belong in the error state.
@@ -125,7 +146,11 @@ class CommandRunner:
             return True
         finally:
             if selected_gpus:
-                release_reserved_gpus(selected_gpus)
+                resource_id = reservation.resource_id if reservation is not None else LOCAL_RESOURCE
+                if resource_id == LOCAL_RESOURCE:
+                    release_reserved_gpus(selected_gpus)
+                else:
+                    release_reserved_gpus(selected_gpus, resource_id=resource_id)
 
         if result.exit_code == 0:
             self.database.mark_succeeded(command_id, result.exit_code)
@@ -147,11 +172,12 @@ class GroupScheduler:
         database: Database,
         logs_dir: Path,
         poll_interval_seconds: float = 1.0,
+        gpu_host_config: GPUHostConfig | None = None,
     ) -> None:
         self.database = database
         self.logs_dir = logs_dir
         self.poll_interval_seconds = poll_interval_seconds
-        self.runner = CommandRunner(database, logs_dir)
+        self.runner = CommandRunner(database, logs_dir, gpu_host_config)
         self._condition = threading.Condition()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None

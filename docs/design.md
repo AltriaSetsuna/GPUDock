@@ -1,14 +1,16 @@
 # GPUDock Design
 
-GPUDock is a local scheduler for GPU-backed bash scripts. It constrains execution to validated script files, stable-idle GPU availability, and task-group ordering.
+GPUDock is a local scheduler for GPU-backed bash scripts. It constrains execution to validated script files, stable-idle GPU availability, task-group ordering, and an explicit distinction between where commands run and where GPU capacity is monitored.
 
 ## Goals
 
 - Accept only absolute `.sh` script paths, optionally prefixed with environment assignments.
 - Parse `GPU_COUNT` from each submitted command first, then from the script.
 - Launch GPU tasks only on GPUs that stay below 1% memory usage for the task's `min_idle_seconds`.
-- Reserve assigned GPUs locally until the owning task exits.
+- Monitor local GPUs by default and configured remote GPU hosts when command/script environment variables select them.
+- Reserve assigned GPUs by resource, for example `local:0` or `node1:0`, until the owning task exits.
 - Inject `CUDA_DEVICES` and override `GPU_COUNT` at launch time.
+- Always launch submitted scripts locally, even when GPU monitoring is remote.
 - Keep new task groups in `draft` until the user explicitly starts them.
 - Let users reorder pending commands inside a draft group before launch.
 - Run commands serially inside each task group.
@@ -30,8 +32,9 @@ The old `queue` column from earlier versions is ignored if it exists in an upgra
 GPU-specific fields:
 
 - `gpu_count`: parsed from the submitted command or script.
+- `gpu_resource`: selected GPU resource, default `local`; remote values are configured host aliases such as `node1`.
 - `min_idle_seconds`: task-specific continuous idle window, default `120`, max `86400`.
-- `assigned_gpu_ids`: comma-separated GPU IDs injected as `CUDA_DEVICES`.
+- `assigned_gpu_ids`: comma-separated resource-prefixed GPU IDs, for example `local:0` or `node1:0`.
 
 Task group status is derived from commands:
 
@@ -80,11 +83,35 @@ DATA_PATH=/home/data.json bash /absolute/path/to/train.sh --epochs 3
 
 ## GPU Selection
 
-GPUDock reads GPU memory usage using `nvidia-smi`:
+GPUDock resolves a GPU resource for each command before selecting GPUs. If no configured remote environment variable is present, the resource is `local`. Otherwise, the configured environment variable selects a remote host alias.
+
+The default config path is `.cmddock/gpu_hosts.conf`:
+
+```text
+Host node1
+  HostName 10.75.76.2
+  User yijiali
+  Port 22
+  IdentityFile ~/.ssh/node1_rsa
+
+RemoteEnv VLLM_TARGET
+```
+
+`RemoteEnv VLLM_TARGET` treats the runtime value of `VLLM_TARGET` as a host alias. GPUDock also supports explicit value mapping:
+
+```text
+RemoteEnv VLLM_TARGET serve-a node1
+```
+
+Environment resolution uses the submitted command assignments first, then static assignments in the script file, then referenced vLLM config defaults such as `config/vllm_hosts.env`. This lets `VLLM_TARGET=node1 GPU_COUNT=2 bash /abs/job.sh` override a script default, while scripts that call `vllm_configure_target` can still select a remote target through `VLLM_TARGET_DEFAULT`.
+
+GPUDock reads GPU memory usage using `nvidia-smi` on the selected resource:
 
 ```bash
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits
 ```
+
+For remote resources, GPUDock runs that `nvidia-smi` command over SSH using the configured host options. It does not run the submitted job over SSH.
 
 A GPU is idle only after it has stayed below the threshold for the task's required
 continuous idle window. The default is 120 seconds, and `min_idle_seconds` can be
@@ -102,7 +129,7 @@ If a task needs `GPU_COUNT=n`, GPUDock selects the first `n` stable-idle GPU IDs
 exit_status = waiting_for_gpu
 ```
 
-Selection and reservation happen together under a process-local lock. During model startup, a process may not have allocated visible GPU memory yet, so another runner could otherwise observe the same GPU as idle and start a large task on it. GPUDock keeps selected GPU IDs reserved until the task exits or launch fails.
+Selection and reservation happen together under a process-local lock. During model startup, a process may not have allocated visible GPU memory yet, so another runner could otherwise observe the same GPU as idle and start a large task on it. GPUDock keeps selected GPU IDs reserved until the task exits or launch fails. Idle timers and reservations are keyed by `(resource, gpu_id)`, so hosts can have different GPU counts and overlapping local GPU indexes without collisions.
 
 ## Scheduling
 
@@ -112,10 +139,11 @@ The scheduler is group-aware:
 2. It looks for groups whose execution state is `running`.
 3. It skips any group that has an error command.
 4. It chooses the first pending command by `commands.position` from each runnable group.
-5. If the command declares `GPU_COUNT`, it tries to reserve GPUs that satisfy that command's `min_idle_seconds`.
-6. If GPUs are insufficient, it requeues the command with `waiting_for_gpu`, skips that group for the current pass, and keeps scanning later groups.
-7. If the command has no `GPU_COUNT`, it skips GPU reservation.
-8. It launches selected commands in separate runner threads when their scheduling requirements are met.
+5. It resolves the command's GPU resource from configured environment variables or falls back to `local`.
+6. If the command declares `GPU_COUNT`, it tries to reserve GPUs on that resource that satisfy that command's `min_idle_seconds`.
+7. If GPUs are insufficient, it requeues the command with `waiting_for_gpu`, skips that group for the current pass, and keeps scanning later groups.
+8. If the command has no `GPU_COUNT`, it skips GPU reservation.
+9. It launches selected commands locally in separate runner threads when their scheduling requirements are met.
 
 This gives the desired behavior:
 
@@ -140,6 +168,14 @@ bash /absolute/path/to/script.sh
 
 Environment assignments submitted before the script are passed into the subprocess environment. GPUDock still launches the parsed script path directly with `bash`; it does not run the submitted text through a shell.
 
+Remote GPU monitoring does not change launch location. A command such as:
+
+```bash
+VLLM_TARGET=node1 GPU_COUNT=2 bash /absolute/path/to/run_eval.sh
+```
+
+still launches `/absolute/path/to/run_eval.sh` locally. GPUDock only uses SSH to inspect GPU memory on `node1` before the local launch.
+
 If the submitted command includes `GPU_COUNT=<n>`, that value is used for scheduling and for the launched subprocess environment. If it is omitted, GPUDock reads the script's last `GPU_COUNT=<n>` or `export GPU_COUNT=<n>` assignment. If neither source declares `GPU_COUNT`, the task is non-GPU.
 
 For GPU tasks, it injects:
@@ -151,15 +187,19 @@ GPU_COUNT=<number of selected ids>
 
 This overrides any submitted or parent `CUDA_DEVICES` value. `GPU_COUNT` comes from the submitted command when present, otherwise from the script.
 
+`CUDA_DEVICES` contains the selected GPU IDs on the selected resource. The persisted `assigned_gpu_ids` field includes the resource prefix for auditability, for example `node1:1,node1:2`.
+
 For non-GPU tasks, GPUDock does not inject `CUDA_DEVICES` or `GPU_COUNT`.
 
 ## Email
 
-Startup notification follows the approach in `/home/yijiali/python.py`:
+Startup notification follows the approach in `/home/yijiali/python.py`, with all addresses and credentials read from environment variables:
 
 - SMTP over SSL for port `465`;
 - otherwise SMTP plus `starttls()`;
 - MIME text message with UTF-8 body.
+
+If `GPUDOCK_EMAIL_RECEIVER`, `GPUDOCK_EMAIL_SENDER`, `GPUDOCK_EMAIL_PASSWORD`, or `GPUDOCK_SMTP_SERVER` is missing, email is skipped.
 
 The notification is sent after `subprocess.Popen(...)` succeeds and the process ID has been recorded.
 

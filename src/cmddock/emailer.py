@@ -4,7 +4,7 @@ import logging
 import os
 import smtplib
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -13,15 +13,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class EmailConfig:
-    receiver: str | None = os.getenv("GPUDOCK_EMAIL_RECEIVER", "1744141921@qq.com")
-    sender: str | None = os.getenv("GPUDOCK_EMAIL_SENDER", "1744141921@qq.com")
-    password: str | None = os.getenv("GPUDOCK_EMAIL_PASSWORD", "zvlnwyusxlqpbhia")
-    smtp_server: str = os.getenv("GPUDOCK_SMTP_SERVER", "smtp.qq.com")
-    smtp_port: int = int(os.getenv("GPUDOCK_SMTP_PORT", "465"))
+    receiver: str | None = field(default_factory=lambda: _getenv_optional("GPUDOCK_EMAIL_RECEIVER"))
+    sender: str | None = field(default_factory=lambda: _getenv_optional("GPUDOCK_EMAIL_SENDER"))
+    password: str | None = field(default_factory=lambda: _getenv_optional("GPUDOCK_EMAIL_PASSWORD"))
+    smtp_server: str | None = field(default_factory=lambda: _getenv_optional("GPUDOCK_SMTP_SERVER"))
+    smtp_port: int = field(default_factory=lambda: int(os.getenv("GPUDOCK_SMTP_PORT", "465")))
 
     @property
     def enabled(self) -> bool:
-        return bool(self.receiver and self.sender and self.password)
+        return bool(self.receiver and self.sender and self.password and self.smtp_server)
 
 
 def send_launch_email_async(
@@ -30,6 +30,7 @@ def send_launch_email_async(
     selected_gpus: list[int],
     idle_gpus: list[int],
     command_id: int,
+    gpu_resource: str = "local",
     config: EmailConfig | None = None,
 ) -> None:
     email_config = config or EmailConfig()
@@ -42,6 +43,7 @@ def send_launch_email_async(
             "selected_gpus": list(selected_gpus),
             "idle_gpus": list(idle_gpus),
             "command_id": command_id,
+            "gpu_resource": gpu_resource,
             "config": email_config,
         },
         daemon=True,
@@ -54,16 +56,19 @@ def send_launch_email(
     selected_gpus: list[int],
     idle_gpus: list[int],
     command_id: int,
+    gpu_resource: str,
     config: EmailConfig,
 ) -> None:
     cuda_devices = ",".join(str(gpu_id) for gpu_id in selected_gpus)
-    idle_text = ", ".join(str(gpu_id) for gpu_id in idle_gpus) if idle_gpus else "无"
+    selected_text = _format_gpu_list(gpu_resource, selected_gpus)
+    idle_text = _format_gpu_list(gpu_resource, idle_gpus) if idle_gpus else "无"
     subject = "✅ GPUDock GPU 任务已启动"
     body = (
         "GPUDock 报告：GPU 空闲条件已满足，任务已启动。\n\n"
         f"任务 ID: {command_id}\n"
         f"脚本路径: {script_path}\n"
-        f"使用 GPU: {cuda_devices}\n"
+        f"GPU 资源: {gpu_resource}\n"
+        f"使用 GPU: {selected_text}\n"
         f"GPU_COUNT: {len(selected_gpus)}\n"
         f"当前可用 GPU: {idle_text}\n"
         f"注入环境: CUDA_DEVICES={cuda_devices}\n"
@@ -86,3 +91,12 @@ def send_launch_email(
         server.quit()
     except Exception:
         logger.exception("Failed to send GPUDock launch email")
+
+
+def _getenv_optional(name: str) -> str | None:
+    value = os.getenv(name)
+    return value or None
+
+
+def _format_gpu_list(resource_id: str, gpu_ids: list[int]) -> str:
+    return ", ".join(f"{resource_id}:{gpu_id}" for gpu_id in gpu_ids)

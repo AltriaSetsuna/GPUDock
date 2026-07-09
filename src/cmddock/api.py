@@ -9,7 +9,8 @@ from fastapi.responses import HTMLResponse
 
 from cmddock.config import Settings
 from cmddock.database import Database
-from cmddock.gpu import parse_gpu_count, parse_submission_command
+from cmddock.gpu import parse_gpu_count, parse_submission_command, resolve_gpu_resource
+from cmddock.hosts import load_gpu_host_config
 from cmddock.models import (
     CommandCreate,
     CommandList,
@@ -31,11 +32,13 @@ from cmddock.worker import GroupScheduler
 class AppState:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.gpu_host_config = load_gpu_host_config(settings.resolved_gpu_hosts_config_path)
         self.database = Database(settings.database_path)
         self.scheduler = GroupScheduler(
             self.database,
             settings.logs_dir,
             settings.poll_interval_seconds,
+            self.gpu_host_config,
         )
 
     def start_workers(self) -> None:
@@ -62,7 +65,7 @@ def build_app(settings: Settings) -> FastAPI:
 
     app = FastAPI(
         title="GPUDock",
-        version="0.4.0",
+        version="0.5.0",
         summary="Local GPU script scheduler with serial task groups",
         lifespan=lifespan,
     )
@@ -197,11 +200,13 @@ def build_app(settings: Settings) -> FastAPI:
         try:
             parsed = parse_submission_command(payload.command)
             gpu_count = parse_gpu_count(payload.command)
+            gpu_resource = resolve_gpu_resource(payload.command, app_state.gpu_host_config)
             record = app_state.database.create_command(
                 parsed.command,
                 payload.cwd,
                 group_id=payload.group_id,
                 gpu_count=gpu_count,
+                gpu_resource=gpu_resource,
                 group_name=payload.group_name,
                 min_idle_seconds=payload.min_idle_seconds,
             )

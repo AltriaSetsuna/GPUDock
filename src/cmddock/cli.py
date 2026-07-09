@@ -11,7 +11,8 @@ import uvicorn
 from cmddock.api import build_app
 from cmddock.config import build_settings
 from cmddock.database import Database
-from cmddock.gpu import parse_gpu_count, parse_submission_command
+from cmddock.gpu import parse_gpu_count, parse_submission_command, resolve_gpu_resource
+from cmddock.hosts import load_gpu_host_config
 from cmddock.models import CommandStatus
 from cmddock.process_control import terminate_process_group
 from cmddock.scheduling import (
@@ -32,9 +33,18 @@ def serve(
     host: Annotated[str, typer.Option(help="Bind host.")] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="Bind port.")] = 8765,
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+    gpu_hosts_config: Annotated[
+        Path | None,
+        typer.Option(help="GPU host config path. Defaults to DATA_DIR/gpu_hosts.conf."),
+    ] = None,
 ) -> None:
     """Start the HTTP API and task-group scheduler."""
-    settings = build_settings(data_dir=data_dir, host=host, port=port)
+    settings = build_settings(
+        data_dir=data_dir,
+        host=host,
+        port=port,
+        gpu_hosts_config=gpu_hosts_config,
+    )
     uvicorn.run(build_app(settings), host=settings.host, port=settings.port)
 
 
@@ -149,12 +159,15 @@ def add(
     try:
         parsed = parse_submission_command(command)
         gpu_count = parse_gpu_count(command)
+        gpu_host_config = load_gpu_host_config(settings.resolved_gpu_hosts_config_path)
+        gpu_resource = resolve_gpu_resource(command, gpu_host_config)
         normalized_min_idle_seconds = normalize_min_idle_seconds(min_idle_seconds)
         record = database.create_command(
             parsed.command,
             str(cwd) if cwd is not None else None,
             group_id=group_id,
             gpu_count=gpu_count,
+            gpu_resource=gpu_resource,
             group_name=None if group_id is not None else group,
             min_idle_seconds=normalized_min_idle_seconds,
         )
@@ -166,11 +179,21 @@ def add(
 @app.command()
 def worker(
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+    gpu_hosts_config: Annotated[
+        Path | None,
+        typer.Option(help="GPU host config path. Defaults to DATA_DIR/gpu_hosts.conf."),
+    ] = None,
 ) -> None:
     """Run the task-group GPU scheduler."""
-    settings = build_settings(data_dir=data_dir)
+    settings = build_settings(data_dir=data_dir, gpu_hosts_config=gpu_hosts_config)
     database = Database(settings.database_path)
-    scheduler = GroupScheduler(database, settings.logs_dir, settings.poll_interval_seconds)
+    gpu_host_config = load_gpu_host_config(settings.resolved_gpu_hosts_config_path)
+    scheduler = GroupScheduler(
+        database,
+        settings.logs_dir,
+        settings.poll_interval_seconds,
+        gpu_host_config,
+    )
     scheduler.start()
     try:
         while True:
