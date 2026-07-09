@@ -10,6 +10,9 @@
 - Added fail-closed remote GPU target resolution for vLLM defaults, including `config/vllm_hosts.env` support.
 - Added a local default `.cmddock/gpu_hosts.conf` for `node1` and `VLLM_TARGET`.
 - Removed hardcoded email addresses and SMTP credentials from code and docs.
+- Allowed `error` commands to be canceled so a blocked task group can continue or be deleted.
+- Avoided transient false `running` status while a task is only checking GPU availability.
+- Added `.bashrc` GPUDock email block fallback when email environment variables are absent.
 - Updated the dashboard, README, design docs, and tests for remote GPU scheduling.
 
 ## 0.4.0

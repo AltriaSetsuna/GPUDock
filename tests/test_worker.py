@@ -119,6 +119,7 @@ def test_group_scheduler_skips_gpu_blocked_group_and_runs_later_group(tmp_path, 
     b_record = database.get_command(b_task["id"])
 
     assert b_record["status"] == CommandStatus.PENDING
+    assert b_record["started_at"] is None
     assert b_record["exit_status"] == "waiting_for_gpu"
     assert (logs_dir / f"{c_task['id']}.stdout.log").read_text() == "c"
 

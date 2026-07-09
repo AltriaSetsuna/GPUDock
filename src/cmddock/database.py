@@ -531,14 +531,18 @@ class Database:
     def cancel_pending_command(self, command_id: int) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
             existing = self.get_command(command_id, conn=conn)
-            if existing["status"] != CommandStatus.PENDING:
-                raise ValueError("Only pending commands can be canceled.")
+            if existing["status"] not in {CommandStatus.PENDING, CommandStatus.ERROR}:
+                raise ValueError("Only pending or error commands can be canceled.")
             conn.execute(
                 """
                 UPDATE commands
                 SET status = ?,
                     finished_at = ?,
+                    exit_code = NULL,
                     exit_status = 'canceled',
+                    pid = NULL,
+                    assigned_gpu_ids = NULL,
+                    run_after_id = NULL,
                     error_message = 'Canceled before execution.'
                 WHERE id = ?
                 """,
@@ -633,85 +637,111 @@ class Database:
         excluded_group_ids: set[int] | None = None,
     ) -> dict[str, Any] | None:
         with self._lock, self.connect() as conn:
-            excluded_group_ids = excluded_group_ids or set()
-            excluded_values = sorted(excluded_group_ids)
-            excluded_clause = ""
-            if excluded_values:
-                placeholders = ", ".join("?" for _ in excluded_values)
-                excluded_clause = f"AND c.group_id NOT IN ({placeholders})"
-            row = conn.execute(
-                f"""
-                SELECT c.*
-                FROM commands c
-                JOIN task_groups g ON g.id = c.group_id
-                WHERE c.status = ?
-                  AND g.archived_at IS NULL
-                  AND g.execution_state = ?
-                  AND g.manual_start_required = 0
-                  {excluded_clause}
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM commands running
-                      WHERE running.group_id = c.group_id
-                        AND running.status = ?
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM commands failed
-                      WHERE failed.group_id = c.group_id
-                        AND failed.status = ?
-                  )
-                  AND c.id = (
-                      SELECT p.id
-                      FROM commands p
-                      WHERE p.group_id = c.group_id
-                        AND p.status = ?
-                      ORDER BY
-                          CASE WHEN p.run_after_id IS NULL THEN 1 ELSE 0 END ASC,
-                          p.run_after_id ASC,
-                          p.position ASC,
-                          p.id ASC
-                      LIMIT 1
-                  )
-                ORDER BY
-                    g.position ASC,
-                    c.group_id ASC,
-                    CASE WHEN c.run_after_id IS NULL THEN 1 ELSE 0 END ASC,
-                    c.run_after_id ASC,
-                    c.position ASC,
-                    c.id ASC
-                LIMIT 1
-                """,
-                [
-                    CommandStatus.PENDING,
-                    GroupExecutionState.RUNNING,
-                    *excluded_values,
-                    CommandStatus.RUNNING,
-                    CommandStatus.ERROR,
-                    CommandStatus.PENDING,
-                ],
-            ).fetchone()
+            row = self._select_next_pending_command(conn, excluded_group_ids)
             if row is None:
                 return None
+            return self._mark_command_running(conn, row["id"])
 
-            command_id = row["id"]
-            conn.execute(
-                """
-                UPDATE commands
-                SET status = ?,
-                    started_at = ?,
-                    finished_at = NULL,
-                    exit_code = NULL,
-                    exit_status = NULL,
-                    pid = NULL,
-                    assigned_gpu_ids = NULL,
-                    error_message = NULL,
-                    run_after_id = NULL
-                WHERE id = ? AND status = ?
-                """,
-                (CommandStatus.RUNNING, utc_now(), command_id, CommandStatus.PENDING),
-            )
-            return self.get_command(command_id, conn=conn)
+    def select_next_pending_command(
+        self,
+        excluded_group_ids: set[int] | None = None,
+    ) -> dict[str, Any] | None:
+        with self._lock, self.connect() as conn:
+            row = self._select_next_pending_command(conn, excluded_group_ids)
+            return self.get_command(row["id"], conn=conn) if row is not None else None
+
+    def mark_command_running(self, command_id: int) -> dict[str, Any] | None:
+        with self._lock, self.connect() as conn:
+            return self._mark_command_running(conn, command_id)
+
+    def _select_next_pending_command(
+        self,
+        conn: sqlite3.Connection,
+        excluded_group_ids: set[int] | None = None,
+    ) -> sqlite3.Row | None:
+        excluded_group_ids = excluded_group_ids or set()
+        excluded_values = sorted(excluded_group_ids)
+        excluded_clause = ""
+        if excluded_values:
+            placeholders = ", ".join("?" for _ in excluded_values)
+            excluded_clause = f"AND c.group_id NOT IN ({placeholders})"
+        return conn.execute(
+            f"""
+            SELECT c.*
+            FROM commands c
+            JOIN task_groups g ON g.id = c.group_id
+            WHERE c.status = ?
+              AND g.archived_at IS NULL
+              AND g.execution_state = ?
+              AND g.manual_start_required = 0
+              {excluded_clause}
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM commands running
+                  WHERE running.group_id = c.group_id
+                    AND running.status = ?
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM commands failed
+                  WHERE failed.group_id = c.group_id
+                    AND failed.status = ?
+              )
+              AND c.id = (
+                  SELECT p.id
+                  FROM commands p
+                  WHERE p.group_id = c.group_id
+                    AND p.status = ?
+                  ORDER BY
+                      CASE WHEN p.run_after_id IS NULL THEN 1 ELSE 0 END ASC,
+                      p.run_after_id ASC,
+                      p.position ASC,
+                      p.id ASC
+                  LIMIT 1
+              )
+            ORDER BY
+                g.position ASC,
+                c.group_id ASC,
+                CASE WHEN c.run_after_id IS NULL THEN 1 ELSE 0 END ASC,
+                c.run_after_id ASC,
+                c.position ASC,
+                c.id ASC
+            LIMIT 1
+            """,
+            [
+                CommandStatus.PENDING,
+                GroupExecutionState.RUNNING,
+                *excluded_values,
+                CommandStatus.RUNNING,
+                CommandStatus.ERROR,
+                CommandStatus.PENDING,
+            ],
+        ).fetchone()
+
+    def _mark_command_running(
+        self,
+        conn: sqlite3.Connection,
+        command_id: int,
+    ) -> dict[str, Any] | None:
+        cursor = conn.execute(
+            """
+            UPDATE commands
+            SET status = ?,
+                started_at = ?,
+                finished_at = NULL,
+                exit_code = NULL,
+                exit_status = NULL,
+                pid = NULL,
+                assigned_gpu_ids = NULL,
+                error_message = NULL,
+                run_after_id = NULL
+            WHERE id = ? AND status = ?
+            """,
+            (CommandStatus.RUNNING, utc_now(), command_id, CommandStatus.PENDING),
+        )
+        if cursor.rowcount == 0:
+            return None
+        return self.get_command(command_id, conn=conn)
 
     def mark_succeeded(self, command_id: int, exit_code: int) -> dict[str, Any]:
         return self._finish(command_id, CommandStatus.SUCCEEDED, exit_code, "succeeded", None)

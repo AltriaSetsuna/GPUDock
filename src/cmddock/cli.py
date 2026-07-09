@@ -239,10 +239,10 @@ def errors(
 
 @app.command()
 def cancel(
-    command_id: Annotated[int, typer.Argument(help="Pending command ID to cancel.")],
+    command_id: Annotated[int, typer.Argument(help="Pending or error command ID to cancel.")],
     data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
 ) -> None:
-    """Cancel a pending command."""
+    """Cancel a pending or error command."""
     settings = build_settings(data_dir=data_dir)
     database = Database(settings.database_path)
     try:

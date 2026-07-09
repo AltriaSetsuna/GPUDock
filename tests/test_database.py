@@ -380,6 +380,43 @@ def test_error_blocks_later_commands_in_same_group(tmp_path):
     assert database.claim_next_pending_command() is None
 
 
+def test_select_next_pending_command_does_not_mark_running(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("echo wait", None)
+    database.start_task_group(command["group_id"])
+
+    selected = database.select_next_pending_command()
+    stored = database.get_command(command["id"])
+    claimed = database.mark_command_running(command["id"])
+
+    assert selected["id"] == command["id"]
+    assert stored["status"] == CommandStatus.PENDING
+    assert stored["started_at"] is None
+    assert claimed is not None
+    assert claimed["status"] == CommandStatus.RUNNING
+
+
+def test_error_command_can_be_canceled_to_unblock_group(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    group = database.create_task_group("cancel-error")
+    first = database.create_command("false", None, group_id=group["id"])
+    second = database.create_command("echo later", None, group_id=group["id"])
+    database.start_task_group(group["id"])
+    claimed = database.claim_next_pending_command()
+
+    assert claimed["id"] == first["id"]
+
+    database.mark_error(first["id"], 1, "exited_nonzero:1", "boom")
+    canceled = database.cancel_pending_command(first["id"])
+    next_claimed = database.claim_next_pending_command()
+
+    assert canceled["status"] == CommandStatus.CANCELED
+    assert canceled["exit_status"] == "canceled"
+    assert canceled["exit_code"] is None
+    assert canceled["error_message"] == "Canceled before execution."
+    assert next_claimed["id"] == second["id"]
+
+
 def test_task_group_delete_requires_all_commands_terminal_ok_or_canceled(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     group = database.create_task_group("cleanup")

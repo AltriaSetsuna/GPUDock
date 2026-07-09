@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import smtplib
 import threading
 from dataclasses import dataclass, field
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from functools import lru_cache
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,9 @@ class EmailConfig:
     sender: str | None = field(default_factory=lambda: _getenv_optional("GPUDOCK_EMAIL_SENDER"))
     password: str | None = field(default_factory=lambda: _getenv_optional("GPUDOCK_EMAIL_PASSWORD"))
     smtp_server: str | None = field(default_factory=lambda: _getenv_optional("GPUDOCK_SMTP_SERVER"))
-    smtp_port: int = field(default_factory=lambda: int(os.getenv("GPUDOCK_SMTP_PORT", "465")))
+    smtp_port: int = field(
+        default_factory=lambda: int(_getenv_optional("GPUDOCK_SMTP_PORT") or "465"),
+    )
 
     @property
     def enabled(self) -> bool:
@@ -95,7 +100,39 @@ def send_launch_email(
 
 def _getenv_optional(name: str) -> str | None:
     value = os.getenv(name)
-    return value or None
+    if value:
+        return value
+    return _load_shell_email_settings().get(name)
+
+
+@lru_cache(maxsize=1)
+def _load_shell_email_settings() -> dict[str, str]:
+    bashrc = Path.home() / ".bashrc"
+    if not bashrc.exists():
+        return {}
+    text = bashrc.read_text(errors="replace")
+    settings: dict[str, str] = {}
+    in_block = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line == "# >>> GPUDock email settings >>>":
+            in_block = True
+            continue
+        if line == "# <<< GPUDock email settings <<<":
+            break
+        if not in_block or not line.startswith("export "):
+            continue
+        try:
+            parts = shlex.split(line[len("export ") :])
+        except ValueError:
+            continue
+        for part in parts:
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            if key.startswith("GPUDOCK_"):
+                settings[key] = value
+    return settings
 
 
 def _format_gpu_list(resource_id: str, gpu_ids: list[int]) -> str:

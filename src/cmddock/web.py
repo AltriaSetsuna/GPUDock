@@ -721,7 +721,7 @@ def render_index() -> str:
       const pendingTasks = activeTasks.filter((task) => task.status === "pending");
       for (const [index, task] of activeTasks.entries()) {
         const canRetry = task.status === "error" || isKilledPendingTask(task) ? "" : "disabled";
-        const canCancel = task.status === "pending" ? "" : "disabled";
+        const canCancel = task.status === "pending" || task.status === "error" ? "" : "disabled";
         const canKill = task.status === "running" ? "" : "disabled";
         const pendingIndex = pendingTasks.findIndex((pendingTask) => pendingTask.id === task.id);
         const canMove = selectedGroup && selectedGroup.execution_state === "draft"

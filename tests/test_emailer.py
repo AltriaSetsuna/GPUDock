@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from cmddock.emailer import EmailConfig, send_launch_email
 
 
 def test_email_config_requires_environment_values(monkeypatch):
+    monkeypatch.setattr("cmddock.emailer.Path.home", lambda: Path("/missing-home"))
+    monkeypatch.setattr("cmddock.emailer._load_shell_email_settings", lambda: {})
     for name in [
         "GPUDOCK_EMAIL_RECEIVER",
         "GPUDOCK_EMAIL_SENDER",
@@ -21,6 +25,34 @@ def test_email_config_requires_environment_values(monkeypatch):
     assert config.smtp_server is None
     assert config.smtp_port == 465
     assert not config.enabled
+
+
+def test_email_config_can_read_gpudock_bashrc_block(tmp_path, monkeypatch):
+    monkeypatch.setattr("cmddock.emailer.Path.home", lambda: tmp_path)
+    monkeypatch.delenv("GPUDOCK_EMAIL_RECEIVER", raising=False)
+    monkeypatch.delenv("GPUDOCK_EMAIL_SENDER", raising=False)
+    monkeypatch.delenv("GPUDOCK_EMAIL_PASSWORD", raising=False)
+    monkeypatch.delenv("GPUDOCK_SMTP_SERVER", raising=False)
+    monkeypatch.delenv("GPUDOCK_SMTP_PORT", raising=False)
+    from cmddock import emailer
+
+    emailer._load_shell_email_settings.cache_clear()
+    (tmp_path / ".bashrc").write_text(
+        "# >>> GPUDock email settings >>>\n"
+        "export GPUDOCK_EMAIL_RECEIVER='receiver@example.com'\n"
+        "export GPUDOCK_EMAIL_SENDER='sender@example.com'\n"
+        "export GPUDOCK_EMAIL_PASSWORD='secret'\n"
+        "export GPUDOCK_SMTP_SERVER='smtp.example.com'\n"
+        "export GPUDOCK_SMTP_PORT='465'\n"
+        "# <<< GPUDock email settings <<<\n",
+    )
+
+    config = EmailConfig()
+
+    assert config.enabled
+    assert config.receiver == "receiver@example.com"
+    assert config.smtp_server == "smtp.example.com"
+    emailer._load_shell_email_settings.cache_clear()
 
 
 def test_launch_email_labels_remote_gpu_resource(monkeypatch):
@@ -63,4 +95,3 @@ def test_launch_email_labels_remote_gpu_resource(monkeypatch):
     assert "GPU 资源: node1" in body
     assert "使用 GPU: node1:6, node1:7" in body
     assert "当前可用 GPU: node1:6, node1:7" in body
-

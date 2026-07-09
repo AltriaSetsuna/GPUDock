@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from cmddock.database import Database
@@ -165,6 +165,9 @@ class CommandRunner:
             )
         return True
 
+    def release_prepared_reservation(self, prepared: PreparedCommand) -> None:
+        _release_reservation(prepared.reservation)
+
 
 class GroupScheduler:
     def __init__(
@@ -212,7 +215,7 @@ class GroupScheduler:
             dispatched = False
             skipped_group_ids: set[int] = set()
             while not self._stop_event.is_set():
-                command = self.database.claim_next_pending_command(
+                command = self.database.select_next_pending_command(
                     excluded_group_ids=skipped_group_ids,
                 )
                 if command is None:
@@ -221,6 +224,12 @@ class GroupScheduler:
                 if prepared is None:
                     skipped_group_ids.add(command["group_id"])
                     continue
+                claimed = self.database.mark_command_running(command["id"])
+                if claimed is None:
+                    self.runner.release_prepared_reservation(prepared)
+                    skipped_group_ids.add(command["group_id"])
+                    continue
+                prepared = replace(prepared, command=claimed)
                 dispatched = True
                 self._start_command_thread(prepared)
             if not dispatched:
@@ -245,3 +254,13 @@ class GroupScheduler:
             current_thread = threading.current_thread()
             with self._running_lock:
                 self._running_threads.discard(current_thread)
+            self.wake()
+
+
+def _release_reservation(reservation: GPUReservation | None) -> None:
+    if reservation is None:
+        return
+    if reservation.resource_id == LOCAL_RESOURCE:
+        release_reserved_gpus(reservation.selected_gpu_ids)
+    else:
+        release_reserved_gpus(reservation.selected_gpu_ids, resource_id=reservation.resource_id)
