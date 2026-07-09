@@ -13,6 +13,10 @@
 - Allowed `error` commands to be canceled so a blocked task group can continue or be deleted.
 - Avoided transient false `running` status while a task is only checking GPU availability.
 - Added `.bashrc` GPUDock email block fallback when email environment variables are absent.
+- Added a fixed lower-left GPU status widget backed by local and remote `gpustat -i` snapshots.
+- Added `install.sh` and `uninstall.sh` for a persistent user-level `gpudock` command.
+- Added service state tracking, `gpudock status`, automatic fallback ports, and single-instance `serve` behavior.
+- Prevented sourced install/uninstall scripts from leaking shell options such as `set -e` into the current terminal.
 - Updated the dashboard, README, design docs, and tests for remote GPU scheduling.
 
 ## 0.4.0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Annotated
@@ -19,6 +20,13 @@ from cmddock.scheduling import (
     DEFAULT_MIN_IDLE_SECONDS,
     MAX_MIN_IDLE_SECONDS,
     normalize_min_idle_seconds,
+)
+from cmddock.service_state import (
+    ServiceState,
+    clear_service_state,
+    pick_available_port,
+    running_service,
+    write_service_state,
 )
 from cmddock.worker import GroupScheduler
 
@@ -39,13 +47,50 @@ def serve(
     ] = None,
 ) -> None:
     """Start the HTTP API and task-group scheduler."""
+    existing = running_service(data_dir)
+    if existing is not None:
+        typer.echo(
+            f"GPUDock is already running at {existing.url} "
+            f"(pid {existing.pid}, data dir {existing.data_dir})."
+        )
+        return
+
+    selected_port = pick_available_port(host, port)
+    if selected_port != port:
+        typer.echo(f"Port {port} is busy; starting GPUDock on port {selected_port}.")
+
     settings = build_settings(
         data_dir=data_dir,
         host=host,
-        port=port,
+        port=selected_port,
         gpu_hosts_config=gpu_hosts_config,
     )
-    uvicorn.run(build_app(settings), host=settings.host, port=settings.port)
+    write_service_state(
+        settings.data_dir,
+        ServiceState(
+            pid=os.getpid(),
+            host=settings.host,
+            port=settings.port,
+            data_dir=str(settings.data_dir),
+        ),
+    )
+    typer.echo(f"GPUDock serving at http://{settings.host}:{settings.port}/")
+    try:
+        uvicorn.run(build_app(settings), host=settings.host, port=settings.port)
+    finally:
+        clear_service_state(settings.data_dir)
+
+
+@app.command()
+def status(
+    data_dir: Annotated[Path, typer.Option(help="State directory.")] = Path(".cmddock"),
+) -> None:
+    """Show the running GPUDock service URL and port."""
+    state = running_service(data_dir)
+    if state is None:
+        typer.echo("GPUDock is not running.")
+        raise typer.Exit(code=1)
+    typer.echo(_to_json({"status": "running", **state.__dict__, "url": state.url}))
 
 
 @app.command("create-group")

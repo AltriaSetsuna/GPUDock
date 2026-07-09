@@ -49,3 +49,12 @@ def test_group_order_endpoint_uses_payload_body_not_query_params(tmp_path):
 
     assert query_param_names == set()
     assert body_param_name == "payload"
+
+
+def test_gpu_status_endpoints_are_registered(tmp_path):
+    settings = build_settings(data_dir=tmp_path / "data")
+    app = build_app(settings)
+    paths = {getattr(route, "path", None) for route in app.routes}
+
+    assert "/gpu/resources" in paths
+    assert "/gpu/status" in paths

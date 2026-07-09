@@ -42,6 +42,24 @@ uv sync
 gpudock serve
 ```
 
+For local daily use, install the `gpudock` command into `~/.local/bin`:
+
+```bash
+source ./install.sh
+gpudock serve
+gpudock status
+```
+
+`install.sh` creates or reuses `.venv`, installs GPUDock editable with `uv pip`, writes a
+`~/.local/bin/gpudock` wrapper, and adds `~/.local/bin` to `~/.bashrc` so the command works in
+new terminals. Use `source ./install.sh` when you also want the current terminal to pick up the
+command immediately. If you run `./install.sh` normally, run the printed `export PATH=...` line once
+in that terminal. Remove the wrapper and managed shell block with:
+
+```bash
+./uninstall.sh
+```
+
 Then open the visual dashboard:
 
 ```text
@@ -115,6 +133,11 @@ The legacy `cmddock` entry point is still installed as an alias, but `gpudock` i
 ## Visual Dashboard
 
 `gpudock serve` starts both the HTTP API and a local browser dashboard at `/`.
+
+If port `8765` is busy, `gpudock serve` automatically chooses an available local port and records
+it in the service state file. Use `gpudock status` to check the active PID, port, and dashboard URL.
+If GPUDock is already running for the same state directory, another `gpudock serve` prints the
+existing service URL instead of starting a second scheduler.
 
 The dashboard lets you:
 

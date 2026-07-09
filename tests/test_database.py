@@ -123,6 +123,19 @@ def test_draft_group_is_not_claimed_until_started(tmp_path):
     assert claimed["id"] == command["id"]
 
 
+def test_running_pending_group_can_be_started_again_after_restart(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    command = database.create_command("echo wait", None)
+    started = database.start_task_group(command["group_id"])
+
+    restarted = database.start_task_group(command["group_id"])
+
+    assert started["execution_state"] == GroupExecutionState.RUNNING
+    assert started["status"] == GroupStatus.PENDING
+    assert restarted["execution_state"] == GroupExecutionState.RUNNING
+    assert restarted["status"] == GroupStatus.PENDING
+
+
 def test_pending_commands_can_be_reordered_in_draft_group(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     group = database.create_task_group("ordered")

@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from cmddock.config import Settings
 from cmddock.database import Database
 from cmddock.gpu import parse_gpu_count, parse_submission_command, resolve_gpu_resource
+from cmddock.gpustat import list_gpu_resources, read_gpustat
 from cmddock.hosts import load_gpu_host_config
 from cmddock.models import (
     CommandCreate,
@@ -18,6 +19,8 @@ from cmddock.models import (
     CommandOrderUpdate,
     CommandRecord,
     CommandStatus,
+    GPUResourceList,
+    GPUStatSnapshot,
     SchedulerSnapshot,
     TaskGroupCreate,
     TaskGroupList,
@@ -301,6 +304,21 @@ def build_app(settings: Settings) -> FastAPI:
     @app.get("/queue", response_model=SchedulerSnapshot)
     def queue(app_state: AppState = state_dependency) -> dict[str, list[dict]]:
         return app_state.database.scheduler_snapshot()
+
+    @app.get("/gpu/resources", response_model=GPUResourceList)
+    def gpu_resources(app_state: AppState = state_dependency) -> dict[str, list[str]]:
+        return {"resources": list_gpu_resources(app_state.gpu_host_config)}
+
+    @app.get("/gpu/status", response_model=GPUStatSnapshot)
+    def gpu_status(
+        resource: Annotated[str, Query()] = "local",
+        app_state: AppState = state_dependency,
+    ) -> dict[str, str | bool]:
+        try:
+            result = read_gpustat(resource, app_state.gpu_host_config)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"resource": result.resource, "output": result.output, "ok": result.ok}
 
     return app
 

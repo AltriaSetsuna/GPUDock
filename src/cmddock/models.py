@@ -122,3 +122,13 @@ class CommandLogs(BaseModel):
     id: int
     stdout: str
     stderr: str
+
+
+class GPUResourceList(BaseModel):
+    resources: list[str]
+
+
+class GPUStatSnapshot(BaseModel):
+    resource: str
+    output: str
+    ok: bool

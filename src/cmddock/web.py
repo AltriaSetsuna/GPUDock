@@ -88,6 +88,13 @@ def render_index() -> str:
       align-items: start;
     }
 
+    .left-rail {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
     section {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -221,6 +228,8 @@ def render_index() -> str:
     }
 
     .schedule-warning.show { display: block; }
+    .schedule-warning.ok { color: var(--ok); }
+    .schedule-warning.warn { color: var(--danger); }
 
     .table-wrap { overflow-x: auto; }
 
@@ -339,6 +348,102 @@ def render_index() -> str:
 
     .modal-backdrop.show { display: flex; }
 
+    .gpu-widget {
+      position: static;
+      width: 100%;
+      max-height: min(300px, calc(100vh - 36px));
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      z-index: 20;
+      overflow: hidden;
+    }
+
+    .gpu-widget-header {
+      min-height: 42px;
+      padding: 9px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+      background: #fbfcfe;
+    }
+
+    .gpu-widget-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+      text-align: center;
+    }
+
+    .gpu-widget-close {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: 6px;
+      font-size: 15px;
+      line-height: 1;
+    }
+
+    .gpu-resource-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .gpu-resource-buttons button {
+      padding: 5px 8px;
+      font-size: 12px;
+    }
+
+    .gpu-resource-buttons button.active {
+      color: #fff;
+      border-color: var(--accent);
+      background: var(--accent);
+    }
+
+    .gpu-widget:not(.expanded) .gpu-resource-buttons button.active {
+      color: var(--text);
+      border-color: var(--border);
+      background: #fff;
+    }
+
+    .gpu-widget-body {
+      display: none;
+      max-height: 228px;
+      overflow: auto;
+      background: #0f172a;
+      color: #e5e7eb;
+    }
+
+    .gpu-widget.expanded .gpu-widget-body { display: block; }
+
+    .gpu-status-output {
+      padding: 10px;
+      min-height: 96px;
+      white-space: pre;
+      word-break: normal;
+      overflow-wrap: normal;
+      font-size: 11px;
+      line-height: 1.35;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .gpu-status-meta {
+      padding: 7px 10px;
+      color: #94a3b8;
+      border-top: 1px solid rgb(148 163 184 / 20%);
+      font-size: 11px;
+    }
+
     .modal {
       width: min(900px, 100%);
       max-height: min(760px, calc(100vh - 48px));
@@ -363,6 +468,7 @@ def render_index() -> str:
     @media (max-width: 980px) {
       main { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; }
+      .gpu-widget { width: 100%; }
     }
   </style>
 </head>
@@ -378,28 +484,47 @@ def render_index() -> str:
   </header>
 
   <main>
-    <section>
-      <div class="section-header">
-        <h2>Create Group</h2>
-      </div>
-      <div class="panel-body">
-        <form id="group-form">
-          <div class="field">
-            <label for="group-name">Group name</label>
-            <input id="group-name" name="name" placeholder="qwen sweep" required />
-          </div>
-          <div class="field">
-            <label for="group-description">Description</label>
-            <textarea id="group-description" name="description" placeholder="optional"></textarea>
-          </div>
-          <div class="actions">
-            <button class="primary" type="submit">Create Group</button>
-            <button type="button" id="refresh-button">Refresh</button>
-          </div>
-          <div id="notice" class="notice"></div>
-        </form>
-      </div>
-    </section>
+    <div class="left-rail">
+      <section>
+        <div class="section-header">
+          <h2>Create Group</h2>
+        </div>
+        <div class="panel-body">
+          <form id="group-form">
+            <div class="field">
+              <label for="group-name">Group name</label>
+              <input id="group-name" name="name" placeholder="qwen sweep" required />
+            </div>
+            <div class="field">
+              <label for="group-description">Description</label>
+              <textarea id="group-description" name="description" placeholder="optional"></textarea>
+            </div>
+            <div class="actions">
+              <button class="primary" type="submit">Create Group</button>
+              <button type="button" id="refresh-button">Refresh</button>
+            </div>
+            <div id="notice" class="notice"></div>
+          </form>
+        </div>
+      </section>
+
+      <aside id="gpu-widget" class="gpu-widget" aria-label="GPU status">
+        <div class="gpu-widget-header">
+          <div class="gpu-widget-title">GPU Status</div>
+          <div id="gpu-resource-buttons" class="gpu-resource-buttons"></div>
+          <button
+            type="button"
+            id="gpu-widget-close"
+            class="gpu-widget-close"
+            aria-label="Close GPU status"
+          >x</button>
+        </div>
+        <div class="gpu-widget-body">
+          <pre id="gpu-status-output" class="gpu-status-output">Select a GPU resource.</pre>
+          <div id="gpu-status-meta" class="gpu-status-meta">gpustat -i</div>
+        </div>
+      </aside>
+    </div>
 
     <section id="groups-section">
       <div class="section-header">
@@ -420,7 +545,7 @@ def render_index() -> str:
           </thead>
           <tbody id="groups-body"></tbody>
         </table>
-        <div id="groups-empty" class="empty">No task groups yet.</div>
+        <div id="groups-empty" class="empty">Loading task groups...</div>
       </div>
     </section>
 
@@ -542,9 +667,16 @@ def render_index() -> str:
     const groupsSection = document.querySelector("#groups-section");
     const detailSection = document.querySelector("#detail-section");
     const scheduleWarning = document.querySelector("#schedule-warning");
+    const gpuWidget = document.querySelector("#gpu-widget");
+    const gpuResourceButtons = document.querySelector("#gpu-resource-buttons");
+    const gpuWidgetClose = document.querySelector("#gpu-widget-close");
+    const gpuStatusOutput = document.querySelector("#gpu-status-output");
+    const gpuStatusMeta = document.querySelector("#gpu-status-meta");
     let selectedGroup = null;
     let currentTasks = [];
     let currentGroups = [];
+    let selectedGpuResource = null;
+    let gpuStatusRequestId = 0;
 
     function showNotice(message, type = "") {
       notice.textContent = message;
@@ -564,7 +696,8 @@ def render_index() -> str:
 
     function taskIdle(task) {
       if (!task.gpu_count) return "ignored";
-      return `${task.min_idle_seconds ?? 120}s`;
+      const minIdleSeconds = task.min_idle_seconds == null ? 120 : task.min_idle_seconds;
+      return `${minIdleSeconds}s`;
     }
 
     function isTerminalTask(task) {
@@ -622,6 +755,58 @@ def render_index() -> str:
       }
     }
 
+    function renderGpuResources(resources) {
+      gpuResourceButtons.innerHTML = "";
+      const isExpanded = gpuWidget.classList.contains("expanded");
+      for (const resource of resources) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = resource;
+        button.dataset.resource = resource;
+        button.className = isExpanded && resource === selectedGpuResource ? "active" : "";
+        gpuResourceButtons.appendChild(button);
+      }
+    }
+
+    async function refreshGpuResources() {
+      try {
+        const data = await api("/gpu/resources");
+        const resources = data.resources || [];
+        if (!selectedGpuResource && resources.length) selectedGpuResource = resources[0];
+        renderGpuResources(resources);
+        if (selectedGpuResource) await refreshGpuStatus();
+      } catch (error) {
+        gpuStatusOutput.textContent = error.message;
+        gpuStatusMeta.textContent = "Failed to load GPU resources.";
+      }
+    }
+
+    function showGpuStatusLoading(resource) {
+      gpuStatusOutput.textContent = `Loading ${resource} GPU status...`;
+      gpuStatusMeta.textContent = `${resource} · loading · gpustat -i`;
+    }
+
+    async function refreshGpuStatus(showLoading = false) {
+      if (!selectedGpuResource || !gpuWidget.classList.contains("expanded")) return;
+      const resource = selectedGpuResource;
+      const requestId = ++gpuStatusRequestId;
+      if (showLoading) showGpuStatusLoading(resource);
+      try {
+        const encodedResource = encodeURIComponent(resource);
+        const snapshot = await api(`/gpu/status?resource=${encodedResource}`);
+        if (requestId !== gpuStatusRequestId || resource !== selectedGpuResource) return;
+        if (!gpuWidget.classList.contains("expanded")) return;
+        gpuStatusOutput.textContent = snapshot.output || "No GPU status output.";
+        const statusText = snapshot.ok ? "ok" : "error";
+        gpuStatusMeta.textContent = `${snapshot.resource} · ${statusText} · gpustat -i`;
+      } catch (error) {
+        if (requestId !== gpuStatusRequestId || resource !== selectedGpuResource) return;
+        if (!gpuWidget.classList.contains("expanded")) return;
+        gpuStatusOutput.textContent = error.message;
+        gpuStatusMeta.textContent = `${resource} · error`;
+      }
+    }
+
     async function refreshGroups() {
       const data = await api("/groups");
       renderGroups(data.groups || []);
@@ -639,6 +824,7 @@ def render_index() -> str:
       currentGroups = groups;
       groupsBody.innerHTML = "";
       groupsEmpty.style.display = groups.length ? "none" : "block";
+      groupsEmpty.textContent = groups.length ? "" : "No task groups yet.";
       for (const [index, group] of groups.entries()) {
         const canDelete = group.status === "completed" || group.status === "empty"
           ? ""
@@ -696,15 +882,19 @@ def render_index() -> str:
       if (group.execution_state === "draft") {
         scheduleWarning.textContent =
           "This task group has not been started. Commands will not be scheduled.";
-        scheduleWarning.classList.add("show");
+        scheduleWarning.className = "schedule-warning show warn";
       } else if (group.execution_state === "paused") {
         scheduleWarning.textContent = group.manual_start_required
           ? "This task group requires a manual restart. Pending commands will not be scheduled."
           : "This task group is paused. Pending commands will not be scheduled.";
-        scheduleWarning.classList.add("show");
+        scheduleWarning.className = "schedule-warning show warn";
+      } else if (group.execution_state === "running" && group.pending_count > 0) {
+        scheduleWarning.textContent =
+          "This task group has started successfully. Pending commands are waiting for scheduling.";
+        scheduleWarning.className = "schedule-warning show ok";
       } else {
         scheduleWarning.textContent = "";
-        scheduleWarning.classList.remove("show");
+        scheduleWarning.className = "schedule-warning";
       }
     }
 
@@ -961,16 +1151,50 @@ def render_index() -> str:
     });
     groupsBody.addEventListener("click", groupAction);
     tasksBody.addEventListener("click", taskAction);
+    gpuResourceButtons.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const button = event.target.closest("button[data-resource]");
+      if (!button) return;
+      selectedGpuResource = button.dataset.resource;
+      gpuWidget.classList.add("expanded");
+      const resources = [...gpuResourceButtons.querySelectorAll("button")]
+        .map((item) => item.dataset.resource);
+      renderGpuResources(resources);
+      await refreshGpuStatus(true);
+    });
+    gpuWidgetClose.addEventListener("click", () => {
+      gpuStatusRequestId += 1;
+      gpuWidget.classList.remove("expanded");
+      const resources = [...gpuResourceButtons.querySelectorAll("button")]
+        .map((item) => item.dataset.resource);
+      renderGpuResources(resources);
+    });
+    document.addEventListener("click", (event) => {
+      if (!gpuWidget.classList.contains("expanded")) return;
+      const path = event.composedPath ? event.composedPath() : [];
+      if (gpuWidget.contains(event.target) || path.includes(gpuWidget)) return;
+      gpuStatusRequestId += 1;
+      gpuWidget.classList.remove("expanded");
+      const resources = [...gpuResourceButtons.querySelectorAll("button")]
+        .map((item) => item.dataset.resource);
+      renderGpuResources(resources);
+    });
     document.querySelector("#close-logs").addEventListener("click", () => {
       logsModal.classList.remove("show");
     });
 
+    refreshGroups().catch((error) => {
+      groupsEmpty.style.display = "block";
+      groupsEmpty.textContent = error.message;
+      showNotice(error.message, "error");
+    });
     refreshHealth();
-    refreshGroups();
+    refreshGpuResources();
     setInterval(async () => {
       await refreshGroups();
       await refreshSelectedGroup();
     }, 5000);
+    setInterval(refreshGpuStatus, 3000);
   </script>
 </body>
 </html>"""

@@ -37,7 +37,12 @@ def test_group_detail_warns_when_group_is_not_schedulable() -> None:
     assert "This task group has not been started. Commands will not be scheduled." in html
     assert "This task group is paused. Pending commands will not be scheduled." in html
     assert manual_restart_warning in html
-    assert 'group.execution_state === "draft" || group.execution_state === "paused"' in html
+    assert (
+        "This task group has started successfully. Pending commands are waiting for scheduling."
+        in html
+    )
+    assert 'group.execution_state === "draft"' in html
+    assert 'group.execution_state === "paused"' in html
     assert 'group.execution_state === "draft" || group.status === "completed"' in html
 
 
@@ -50,3 +55,35 @@ def test_dashboard_does_not_show_group_or_task_ids() -> None:
     assert "(#${group.id})" not in html
     assert "Task ${id} Logs" not in html
     assert "Task ${task.id} submitted" not in html
+
+
+def test_dashboard_has_lower_left_gpu_status_widget() -> None:
+    html = render_index()
+
+    assert 'id="gpu-widget"' in html
+    assert 'id="gpu-resource-buttons"' in html
+    assert 'id="gpu-status-output"' in html
+    assert "/gpu/resources" in html
+    assert "/gpu/status?resource=" in html
+    assert "setInterval(refreshGpuStatus, 3000)" in html
+    assert 'class="left-rail"' in html
+    assert "position: static;" in html
+    assert "width: 100%;" in html
+    assert "margin: 0;" in html
+    assert "Loading task groups..." in html
+    assert "isExpanded && resource === selectedGpuResource" in html
+    assert "let gpuStatusRequestId = 0;" in html
+    assert "Loading ${resource} GPU status..." in html
+    assert "requestId !== gpuStatusRequestId || resource !== selectedGpuResource" in html
+    assert "await refreshGpuStatus(true)" in html
+    assert 'id="gpu-widget-close"' in html
+    assert 'gpuWidget.classList.remove("expanded")' in html
+    assert "event.stopPropagation()" in html
+
+
+def test_dashboard_avoids_nullish_coalescing_for_older_browsers() -> None:
+    html = render_index()
+
+    assert "??" not in html
+    assert "?." not in html
+    assert "task.min_idle_seconds == null ? 120 : task.min_idle_seconds" in html
