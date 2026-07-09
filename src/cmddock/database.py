@@ -79,6 +79,18 @@ class Database:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gpu_reservations (
+                    resource_id TEXT NOT NULL,
+                    gpu_id INTEGER NOT NULL,
+                    command_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(resource_id, gpu_id),
+                    FOREIGN KEY(command_id) REFERENCES commands(id) ON DELETE CASCADE
+                )
+                """
+            )
             self._ensure_column(
                 conn,
                 "task_groups",
@@ -135,6 +147,10 @@ class Database:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_task_groups_archived "
                 "ON task_groups(archived_at, position ASC, id ASC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gpu_reservations_command "
+                "ON gpu_reservations(command_id)"
             )
 
     def create_task_group(
@@ -331,6 +347,15 @@ class Database:
 
     def recover_interrupted_running_commands(self) -> int:
         with self._lock, self.connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM gpu_reservations
+                WHERE command_id IN (
+                    SELECT id FROM commands WHERE status = ?
+                )
+                """,
+                (CommandStatus.RUNNING,),
+            )
             cur = conn.execute(
                 """
                 UPDATE commands
@@ -533,6 +558,7 @@ class Database:
             existing = self.get_command(command_id, conn=conn)
             if existing["status"] not in {CommandStatus.PENDING, CommandStatus.ERROR}:
                 raise ValueError("Only pending or error commands can be canceled.")
+            self._release_gpu_reservations(conn, command_id)
             conn.execute(
                 """
                 UPDATE commands
@@ -557,6 +583,7 @@ class Database:
                 raise ValueError("Only running commands can be killed before launch.")
             if existing["pid"] is not None:
                 raise ValueError("Running command already has a recorded process ID.")
+            self._release_gpu_reservations(conn, command_id)
             conn.execute(
                 """
                 UPDATE commands
@@ -602,6 +629,7 @@ class Database:
             )
             if not (can_retry_error or can_retry_killed):
                 raise ValueError("Only error or killed pending commands can be retried.")
+            self._release_gpu_reservations(conn, command_id)
             conn.execute(
                 """
                 UPDATE commands
@@ -650,9 +678,13 @@ class Database:
             row = self._select_next_pending_command(conn, excluded_group_ids)
             return self.get_command(row["id"], conn=conn) if row is not None else None
 
-    def mark_command_running(self, command_id: int) -> dict[str, Any] | None:
+    def mark_command_running(
+        self,
+        command_id: int,
+        assigned_gpu_ids: str | None = None,
+    ) -> dict[str, Any] | None:
         with self._lock, self.connect() as conn:
-            return self._mark_command_running(conn, command_id)
+            return self._mark_command_running(conn, command_id, assigned_gpu_ids)
 
     def _select_next_pending_command(
         self,
@@ -722,7 +754,22 @@ class Database:
         self,
         conn: sqlite3.Connection,
         command_id: int,
+        assigned_gpu_ids: str | None = None,
     ) -> dict[str, Any] | None:
+        gpu_reservations = _parse_assigned_gpu_ids(assigned_gpu_ids)
+        try:
+            for resource_id, gpu_id in gpu_reservations:
+                conn.execute(
+                    """
+                    INSERT INTO gpu_reservations (resource_id, gpu_id, command_id, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (resource_id, gpu_id, command_id, utc_now()),
+                )
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return None
+
         cursor = conn.execute(
             """
             UPDATE commands
@@ -732,14 +779,21 @@ class Database:
                 exit_code = NULL,
                 exit_status = NULL,
                 pid = NULL,
-                assigned_gpu_ids = NULL,
+                assigned_gpu_ids = ?,
                 error_message = NULL,
                 run_after_id = NULL
             WHERE id = ? AND status = ?
             """,
-            (CommandStatus.RUNNING, utc_now(), command_id, CommandStatus.PENDING),
+            (
+                CommandStatus.RUNNING,
+                utc_now(),
+                assigned_gpu_ids,
+                command_id,
+                CommandStatus.PENDING,
+            ),
         )
         if cursor.rowcount == 0:
+            conn.rollback()
             return None
         return self.get_command(command_id, conn=conn)
 
@@ -758,6 +812,7 @@ class Database:
     def requeue_killed(self, command_id: int, exit_code: int, exit_status: str) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
             existing = self.get_command(command_id, conn=conn)
+            self._release_gpu_reservations(conn, command_id)
             conn.execute(
                 """
                 UPDATE commands
@@ -796,6 +851,7 @@ class Database:
 
     def requeue_waiting_for_gpu(self, command_id: int, reason: str) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
+            self._release_gpu_reservations(conn, command_id)
             conn.execute(
                 """
                 UPDATE commands
@@ -888,6 +944,7 @@ class Database:
         error_message: str | None,
     ) -> dict[str, Any]:
         with self._lock, self.connect() as conn:
+            self._release_gpu_reservations(conn, command_id)
             conn.execute(
                 """
                 UPDATE commands
@@ -1101,3 +1158,29 @@ class Database:
         existing_column_names = {column["name"] for column in columns}
         if column_name not in existing_column_names:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
+    @staticmethod
+    def _release_gpu_reservations(conn: sqlite3.Connection, command_id: int) -> None:
+        conn.execute(
+            """
+            DELETE FROM gpu_reservations
+            WHERE command_id = ?
+            """,
+            (command_id,),
+        )
+
+
+def _parse_assigned_gpu_ids(assigned_gpu_ids: str | None) -> list[tuple[str, int]]:
+    if not assigned_gpu_ids:
+        return []
+    reservations: list[tuple[str, int]] = []
+    for raw_item in assigned_gpu_ids.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            resource_id, gpu_id_text = item.rsplit(":", 1)
+        else:
+            resource_id, gpu_id_text = "local", item
+        reservations.append((resource_id, int(gpu_id_text)))
+    return reservations

@@ -84,6 +84,30 @@ def test_task_group_order_controls_scheduler_priority(tmp_path):
     assert second_claim["id"] == a_command["id"]
 
 
+def test_gpu_reservations_prevent_duplicate_running_assignments(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    group_a = database.create_task_group("group-a")
+    group_b = database.create_task_group("group-b")
+    command_a = database.create_command("echo a", None, group_id=group_a["id"])
+    command_b = database.create_command("echo b", None, group_id=group_b["id"])
+
+    first_claim = database.mark_command_running(command_a["id"], "node1:2")
+    conflicting_claim = database.mark_command_running(command_b["id"], "node1:2")
+    command_b_after_conflict = database.get_command(command_b["id"])
+
+    assert first_claim is not None
+    assert first_claim["assigned_gpu_ids"] == "node1:2"
+    assert conflicting_claim is None
+    assert command_b_after_conflict["status"] == CommandStatus.PENDING
+    assert command_b_after_conflict["assigned_gpu_ids"] is None
+
+    database.mark_succeeded(command_a["id"], 0)
+    second_claim = database.mark_command_running(command_b["id"], "node1:2")
+
+    assert second_claim is not None
+    assert second_claim["assigned_gpu_ids"] == "node1:2"
+
+
 def test_completed_task_group_accepts_new_commands_without_auto_starting(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     group = database.create_task_group("repeatable")

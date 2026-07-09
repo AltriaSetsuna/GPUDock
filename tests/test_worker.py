@@ -201,6 +201,7 @@ def test_command_runner_reserves_remote_gpu_but_runs_script_locally(tmp_path, mo
     assert reserve_calls[0][1]["resource_id"] == "node1_vp"
     assert reserve_calls[0][1]["host_config"].hostname == "10.75.76.2"
     assert launched_envs[0]["CUDA_DEVICES"] == "1,2"
+    assert launched_envs[0]["CUDA_VISIBLE_DEVICES"] == "1,2"
     assert launched_envs[0]["GPU_COUNT"] == "2"
     assert launched_envs[0]["VLLM_TARGET"] == "node1_vp"
     assert command_record["status"] == CommandStatus.SUCCEEDED

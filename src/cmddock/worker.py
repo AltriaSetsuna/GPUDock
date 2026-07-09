@@ -92,6 +92,7 @@ class CommandRunner:
             selected_gpus = reservation.selected_gpu_ids
             cuda_devices = ",".join(str(gpu_id) for gpu_id in selected_gpus)
             env["CUDA_DEVICES"] = cuda_devices
+            env["CUDA_VISIBLE_DEVICES"] = cuda_devices
             env["GPU_COUNT"] = str(gpu_count)
         return PreparedCommand(
             command=command,
@@ -224,7 +225,10 @@ class GroupScheduler:
                 if prepared is None:
                     skipped_group_ids.add(command["group_id"])
                     continue
-                claimed = self.database.mark_command_running(command["id"])
+                claimed = self.database.mark_command_running(
+                    command["id"],
+                    _format_assigned_gpu_ids(prepared.reservation),
+                )
                 if claimed is None:
                     self.runner.release_prepared_reservation(prepared)
                     skipped_group_ids.add(command["group_id"])
@@ -264,3 +268,9 @@ def _release_reservation(reservation: GPUReservation | None) -> None:
         release_reserved_gpus(reservation.selected_gpu_ids)
     else:
         release_reserved_gpus(reservation.selected_gpu_ids, resource_id=reservation.resource_id)
+
+
+def _format_assigned_gpu_ids(reservation: GPUReservation | None) -> str | None:
+    if reservation is None:
+        return None
+    return format_gpu_labels(reservation.resource_id, reservation.selected_gpu_ids)
