@@ -103,6 +103,15 @@ RemoteEnv VLLM_TARGET
 RemoteEnv VLLM_TARGET serve-a node1
 ```
 
+Additional cross-server selectors are configured by adding more `RemoteEnv` lines:
+
+```text
+RemoteEnv REMOTE_GPU_TARGET
+RemoteEnv SERVICE_TARGET serve-b node2
+```
+
+The one-argument form uses the environment value as a host alias. The three-argument form maps one specific environment value to one configured host alias. If a command matches multiple remote hosts, resolution fails closed with a validation error rather than choosing arbitrarily.
+
 Environment resolution uses the submitted command assignments first, then static assignments in the script file, then referenced vLLM config defaults such as `config/vllm_hosts.env`. This lets `VLLM_TARGET=node1 GPU_COUNT=2 bash /abs/job.sh` override a script default, while scripts that call `vllm_configure_target` can still select a remote target through `VLLM_TARGET_DEFAULT`.
 
 GPUDock reads GPU memory usage using `nvidia-smi` on the selected resource:
@@ -253,6 +262,10 @@ The dashboard is intentionally thin: it calls the same HTTP endpoints as externa
 - opening stdout/stderr logs;
 - retrying, canceling, or killing commands;
 - deleting completed or empty groups.
+
+The left rail contains the Create Group form and the GPU Status panel. The GPU Status panel uses the same configured GPU resources as the scheduler (`local`, `node1`, and so on), fetches `gpustat -i` snapshots from `/gpu/status`, and is intentionally independent from scheduling state. Resource switching is guarded by a request version counter: selecting a new resource immediately renders a loading message for that resource, and stale responses from earlier resource requests are ignored.
+
+The task-group list renders a loading state until the initial `/groups` request completes. This avoids presenting an empty task list before the first response arrives. The front-end JavaScript intentionally avoids newer syntax such as nullish coalescing so older local browsers do not fail before the first refresh call.
 
 This keeps the browser UI replaceable while the API remains the source of truth.
 

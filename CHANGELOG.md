@@ -17,6 +17,9 @@
 - Added `install.sh` and `uninstall.sh` for a persistent user-level `gpudock` command.
 - Added service state tracking, `gpudock status`, automatic fallback ports, and single-instance `serve` behavior.
 - Prevented sourced install/uninstall scripts from leaking shell options such as `set -e` into the current terminal.
+- Documented how to add additional cross-server environment selectors with `RemoteEnv`.
+- Updated the GPU Status panel to match the Create Group width and ignore stale resource-switch responses.
+- Added dashboard loading and compatibility notes so Task Groups does not appear empty before `/groups` returns.
 - Updated the dashboard, README, design docs, and tests for remote GPU scheduling.
 
 ## 0.4.0

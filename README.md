@@ -25,6 +25,7 @@ The scheduling model is intentionally simple:
 - Reorder pending commands inside a draft group; topmost commands run first.
 - Run each task group serially while scheduling different groups in parallel.
 - Show a task-group dashboard first, with command details inside each group.
+- Show local and remote GPU snapshots in the dashboard's GPU Status panel.
 - Create and delete task groups; deletion is allowed only when all group commands succeeded or were canceled.
 - Requeue tasks when not enough idle GPUs are available.
 - Kill launched tasks by process group. GPUDock sends `SIGTERM` first, then `SIGKILL` if the process group survives.
@@ -114,7 +115,25 @@ RemoteEnv VLLM_TARGET
 VLLM_TARGET=node1 GPU_COUNT=2 bash /absolute/path/to/run_vllm_eval.sh
 ```
 
-You can also map a specific environment value to a host alias:
+To add another cross-server selector, add another `RemoteEnv` line. The one-argument form treats the environment value as the host alias:
+
+```text
+Host node2
+  HostName 10.75.76.3
+  User yijiali
+  Port 22
+  IdentityFile ~/.ssh/node2_rsa
+
+RemoteEnv REMOTE_GPU_TARGET
+```
+
+Then this command monitors `node2` while still running locally:
+
+```bash
+REMOTE_GPU_TARGET=node2 GPU_COUNT=1 bash /absolute/path/to/job.sh
+```
+
+You can also map a specific environment value to a host alias when the variable value is not itself a host name:
 
 ```text
 Host node1
@@ -122,9 +141,12 @@ Host node1
   User yijiali
 
 RemoteEnv VLLM_TARGET serve-a node1
+RemoteEnv SERVICE_TARGET serve-b node2
 ```
 
-Then `VLLM_TARGET=serve-a bash /absolute/path/to/job.sh` monitors `node1`. GPUDock reads environment assignments from the submitted command first, then static assignments in the script, and can also read vLLM target defaults from a referenced `config/vllm_hosts.env`. If no configured remote environment variable is present, the task uses `local`.
+Then `VLLM_TARGET=serve-a bash /absolute/path/to/job.sh` monitors `node1`, and `SERVICE_TARGET=serve-b bash /absolute/path/to/job.sh` monitors `node2`. GPUDock reads environment assignments from the submitted command first, then static assignments in the script, and can also read vLLM target defaults from a referenced `config/vllm_hosts.env`. If no configured remote environment variable is present, the task uses `local`.
+
+If one command matches more than one remote host, GPUDock rejects it instead of guessing which GPU resource to use.
 
 Remote GPU polling uses SSH only for `nvidia-smi`; script execution remains local.
 
@@ -149,9 +171,14 @@ The dashboard lets you:
 - move pending commands up or down before launch; active queue order starts at 1 and excludes succeeded/canceled tasks;
 - start a prepared task group only after its commands and order are final;
 - pause a running task group so no later pending command is claimed;
+- inspect local and remote `gpustat -i` output from the GPU Status panel below Create Group;
 - view stdout/stderr logs;
 - retry, cancel, or kill commands when the command state allows it;
 - delete completed or empty task groups.
+
+The GPU Status panel lists resources such as `local` and configured hosts such as `node1`. When switching between resources, the panel shows a loading message for the newly selected resource and ignores stale responses from older requests, so it never renders one host's GPU output under another host's label.
+
+Task Groups shows a loading message until the first `/groups` request completes. If that request fails, the dashboard shows the error instead of silently waiting for the next refresh interval.
 
 The same dashboard is also available at:
 
@@ -325,7 +352,7 @@ Important behavior:
 ## Development
 
 ```bash
-python -m venv .venv
+uv venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
 pytest
