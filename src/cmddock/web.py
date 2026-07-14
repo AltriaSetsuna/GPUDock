@@ -683,6 +683,12 @@ def render_index() -> str:
       notice.className = `notice show ${type}`;
     }
 
+    function escapeHtml(value) {
+      const element = document.createElement("span");
+      element.textContent = value == null ? "" : String(value);
+      return element.innerHTML;
+    }
+
     function formatTime(value) {
       if (!value) return "";
       return new Date(value).toLocaleString();
@@ -748,8 +754,8 @@ def render_index() -> str:
 
     async function refreshHealth() {
       try {
-        await api("/health");
-        health.textContent = "Service online";
+        const snapshot = await api("/health");
+        health.textContent = snapshot.status === "ok" ? "Service online" : "Scheduler degraded";
       } catch {
         health.textContent = "Service unavailable";
       }
@@ -844,10 +850,12 @@ def render_index() -> str:
               >Down</button>
             </div>
           </td>
-          <td><span class="badge ${group.status}">${group.status}</span></td>
-          <td class="name-cell">${group.name}</td>
+          <td>
+            <span class="badge ${escapeHtml(group.status)}">${escapeHtml(group.status)}</span>
+          </td>
+          <td class="name-cell">${escapeHtml(group.name)}</td>
           <td>${groupCounts(group)}</td>
-          <td class="current">${group.current_command || ""}</td>
+          <td class="current">${escapeHtml(group.current_command || "")}</td>
           <td>${formatTime(group.latest_activity_at)}</td>
           <td>
             <div class="task-actions">
@@ -874,7 +882,9 @@ def render_index() -> str:
       document.querySelector("#pause-group-button").disabled = group.execution_state !== "running";
       const submitButton = submitForm.querySelector("button[type='submit']");
       submitButton.disabled = !(
-        group.execution_state === "draft" || group.status === "completed"
+        group.execution_state === "draft" ||
+        group.execution_state === "running" ||
+        group.status === "completed"
       );
       document.querySelector("#delete-group-button").disabled = !(
         group.status === "completed" || group.status === "empty"
@@ -927,10 +937,10 @@ def render_index() -> str:
               <button data-action="move-down" data-id="${task.id}" ${downDisabled}>Down</button>
             </div>
           </td>
-          <td><span class="badge ${task.status}">${task.status}</span></td>
-          <td>${taskGpu(task)}</td>
+          <td><span class="badge ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span></td>
+          <td>${escapeHtml(taskGpu(task))}</td>
           <td>${taskIdle(task)}</td>
-          <td class="command">${task.command}</td>
+          <td class="command">${escapeHtml(task.command)}</td>
           <td>${formatTime(task.submitted_at)}</td>
           <td>
             <div class="task-actions">
@@ -948,10 +958,10 @@ def render_index() -> str:
       for (const task of historyTasks) {
         const tr = document.createElement("tr");
         tr.innerHTML = `
-          <td><span class="badge ${task.status}">${task.status}</span></td>
-          <td>${taskGpu(task)}</td>
+          <td><span class="badge ${escapeHtml(task.status)}">${escapeHtml(task.status)}</span></td>
+          <td>${escapeHtml(taskGpu(task))}</td>
           <td>${taskIdle(task)}</td>
-          <td class="command">${task.command}</td>
+          <td class="command">${escapeHtml(task.command)}</td>
           <td>${formatTime(task.finished_at)}</td>
           <td>
             <div class="task-actions">

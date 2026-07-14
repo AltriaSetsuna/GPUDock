@@ -26,6 +26,14 @@ def test_build_gpustat_command_for_remote_host(tmp_path) -> None:
 
     assert build_gpustat_command("node1", host) == [
         "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=1",
         "-p",
         "22",
         "-i",

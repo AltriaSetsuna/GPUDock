@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from cmddock.gpu import (
@@ -195,12 +197,16 @@ def test_resolve_gpu_target_uses_vllm_default_without_host_config(tmp_path):
 def test_get_gpu_memory_status_queries_remote_host(tmp_path, monkeypatch):
     captured_cmd = []
 
-    def fake_check_output(cmd, text):
-        captured_cmd.extend(cmd)
-        assert text is True
-        return "0, 0, 1000\n1, 900, 1000\n"
+    class Completed:
+        stdout = "0, 0, 1000\n1, 900, 1000\n"
 
-    monkeypatch.setattr("cmddock.gpu.subprocess.check_output", fake_check_output)
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        assert kwargs["text"] is True
+        assert kwargs["timeout"] == 5.0
+        return Completed()
+
+    monkeypatch.setattr("cmddock.gpu.subprocess.run", fake_run)
 
     statuses = get_gpu_memory_status(
         resource_id="node1_vp",
@@ -213,8 +219,16 @@ def test_get_gpu_memory_status_queries_remote_host(tmp_path, monkeypatch):
         ),
     )
 
-    assert captured_cmd[:6] == [
+    assert captured_cmd[:14] == [
         "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=1",
         "-p",
         "22",
         "-i",
@@ -227,6 +241,16 @@ def test_get_gpu_memory_status_queries_remote_host(tmp_path, monkeypatch):
         "--format=csv,noheader,nounits",
     ]
     assert [status.gpu_id for status in statuses] == [0, 1]
+
+
+def test_get_gpu_memory_status_converts_timeout_to_scheduling_error(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr("cmddock.gpu.subprocess.run", fake_run)
+
+    with pytest.raises(GPUSchedulingError, match="timed out"):
+        get_gpu_memory_status(timeout_seconds=0.25)
 
 
 def test_select_idle_gpus_requires_stable_low_memory_for_120_seconds(monkeypatch):

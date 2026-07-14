@@ -31,6 +31,8 @@ from cmddock.process_control import terminate_process_group
 from cmddock.web import render_index
 from cmddock.worker import GroupScheduler
 
+LOG_PREVIEW_BYTES = 1_000_000
+
 
 class AppState:
     def __init__(self, settings: Settings) -> None:
@@ -79,8 +81,18 @@ def build_app(settings: Settings) -> FastAPI:
     state_dependency = Depends(get_state)
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health(app_state: AppState = state_dependency) -> dict[str, str | bool | float]:
+        scheduler_health = app_state.scheduler.health()
+        heartbeat_age = scheduler_health["scheduler_heartbeat_age_seconds"]
+        scheduler_alive = scheduler_health["scheduler_alive"]
+        healthy = scheduler_alive and heartbeat_age <= max(
+            10.0,
+            settings.poll_interval_seconds * 5,
+        )
+        return {
+            "status": "ok" if healthy else "degraded",
+            **scheduler_health,
+        }
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def index() -> HTMLResponse:
@@ -329,4 +341,15 @@ def _read_text_file(path_value: str | None) -> str:
     path = Path(path_value)
     if not path.exists():
         return ""
-    return path.read_text(errors="replace")
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            start = max(0, size - LOG_PREVIEW_BYTES)
+            handle.seek(start)
+            content = handle.read(LOG_PREVIEW_BYTES).decode(errors="replace")
+    except OSError:
+        return ""
+    if start:
+        return f"[log truncated; showing last {LOG_PREVIEW_BYTES:,} bytes]\n{content}"
+    return content

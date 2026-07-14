@@ -124,6 +124,33 @@ def test_group_scheduler_skips_gpu_blocked_group_and_runs_later_group(tmp_path, 
     assert (logs_dir / f"{c_task['id']}.stdout.log").read_text() == "c"
 
 
+def test_group_scheduler_stop_terminates_running_processes(tmp_path, monkeypatch):
+    database = Database(tmp_path / "cmddock.db")
+    group = database.create_task_group("stopping")
+    script = tmp_path / "long.sh"
+    script.write_text("sleep 30\n")
+    command = database.create_command(str(script), None, group_id=group["id"])
+    database.start_task_group(group["id"])
+
+    scheduler = GroupScheduler(database, tmp_path / "logs", poll_interval_seconds=0.01)
+    scheduler.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        running = database.get_command(command["id"])
+        if running["status"] == CommandStatus.RUNNING and running["pid"] is not None:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("command did not start")
+
+    scheduler.stop()
+
+    stopped = database.get_command(command["id"])
+    assert stopped["status"] == CommandStatus.PENDING
+    assert stopped["pid"] is None
+    assert scheduler.health()["scheduler_alive"] is False
+
+
 def test_command_runner_passes_submission_env_overrides(tmp_path, monkeypatch):
     database = Database(tmp_path / "cmddock.db")
     logs_dir = tmp_path / "logs"

@@ -23,8 +23,10 @@ from cmddock.scheduling import (
 )
 from cmddock.service_state import (
     ServiceState,
+    acquire_service_lock,
     clear_service_state,
     pick_available_port,
+    read_service_state,
     running_service,
     write_service_state,
 )
@@ -55,30 +57,46 @@ def serve(
         )
         return
 
-    selected_port = pick_available_port(host, port)
-    if selected_port != port:
-        typer.echo(f"Port {port} is busy; starting GPUDock on port {selected_port}.")
+    service_lock = acquire_service_lock(data_dir)
+    if service_lock is None:
+        existing = read_service_state(data_dir)
+        if existing is not None:
+            typer.echo(
+                f"GPUDock is already running at {existing.url} "
+                f"(pid {existing.pid}, data dir {existing.data_dir})."
+            )
+        else:
+            typer.echo(f"GPUDock is already running for data dir {data_dir}.")
+        return
 
-    settings = build_settings(
-        data_dir=data_dir,
-        host=host,
-        port=selected_port,
-        gpu_hosts_config=gpu_hosts_config,
-    )
-    write_service_state(
-        settings.data_dir,
-        ServiceState(
-            pid=os.getpid(),
-            host=settings.host,
-            port=settings.port,
-            data_dir=str(settings.data_dir),
-        ),
-    )
-    typer.echo(f"GPUDock serving at http://{settings.host}:{settings.port}/")
+    # A successfully acquired lock is authoritative. Any state file left by a
+    # crashed service is stale and must not block the new instance.
+    clear_service_state(data_dir)
     try:
+        selected_port = pick_available_port(host, port)
+        if selected_port != port:
+            typer.echo(f"Port {port} is busy; starting GPUDock on port {selected_port}.")
+
+        settings = build_settings(
+            data_dir=data_dir,
+            host=host,
+            port=selected_port,
+            gpu_hosts_config=gpu_hosts_config,
+        )
+        write_service_state(
+            settings.data_dir,
+            ServiceState(
+                pid=os.getpid(),
+                host=settings.host,
+                port=settings.port,
+                data_dir=str(settings.data_dir),
+            ),
+        )
+        typer.echo(f"GPUDock serving at http://{settings.host}:{settings.port}/")
         uvicorn.run(build_app(settings), host=settings.host, port=settings.port)
     finally:
-        clear_service_state(settings.data_dir)
+        clear_service_state(data_dir)
+        service_lock.release()
 
 
 @app.command()

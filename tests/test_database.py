@@ -133,6 +133,28 @@ def test_completed_task_group_accepts_new_commands_without_auto_starting(tmp_pat
     assert claimed["id"] == second["id"]
 
 
+def test_running_task_group_accepts_new_commands(tmp_path):
+    database = Database(tmp_path / "cmddock.db")
+    group = database.create_task_group("active")
+    first = database.create_command("echo first", None, group_id=group["id"])
+    database.start_task_group(group["id"])
+    database.claim_next_pending_command()
+
+    second = database.create_command("echo second", None, group_id=group["id"])
+    group_after_add = database.get_task_group(group["id"])
+    blocked_claim = database.claim_next_pending_command()
+
+    assert second["status"] == CommandStatus.PENDING
+    assert group_after_add["execution_state"] == GroupExecutionState.RUNNING
+    assert group_after_add["pending_count"] == 1
+    assert blocked_claim is None
+
+    database.mark_succeeded(first["id"], 0)
+    claimed = database.claim_next_pending_command()
+
+    assert claimed["id"] == second["id"]
+
+
 def test_draft_group_is_not_claimed_until_started(tmp_path):
     database = Database(tmp_path / "cmddock.db")
     command = database.create_command("echo wait", None)

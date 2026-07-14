@@ -4,6 +4,7 @@ import socket
 
 from cmddock.service_state import (
     ServiceState,
+    acquire_service_lock,
     pick_available_port,
     read_service_state,
     running_service,
@@ -28,6 +29,26 @@ def test_running_service_clears_stale_pid(tmp_path):
 
     assert running_service(tmp_path) is None
     assert read_service_state(tmp_path) is None
+
+
+def test_running_service_uses_lock_across_pid_namespaces(tmp_path):
+    state = ServiceState(pid=999999999, host="127.0.0.1", port=8765, data_dir=str(tmp_path))
+    write_service_state(tmp_path, state)
+    lock = acquire_service_lock(tmp_path)
+    assert lock is not None
+    try:
+        assert running_service(tmp_path) == state
+    finally:
+        lock.release()
+
+
+def test_service_lock_allows_only_one_owner(tmp_path):
+    first = acquire_service_lock(tmp_path)
+    second = acquire_service_lock(tmp_path)
+
+    assert first is not None
+    assert second is None
+    first.release()
 
 
 def test_pick_available_port_falls_back_when_default_is_busy():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from cmddock.gpu import (
 )
 from cmddock.hosts import LOCAL_RESOURCE, GPUHostConfig
 from cmddock.models import CommandStatus
+from cmddock.process_control import terminate_process_group
 from cmddock.runner import start_command_process, wait_for_process
 from cmddock.scheduling import normalize_min_idle_seconds
 
@@ -187,10 +189,14 @@ class GroupScheduler:
         self._thread: threading.Thread | None = None
         self._running_threads: set[threading.Thread] = set()
         self._running_lock = threading.Lock()
+        self._heartbeat_lock = threading.Lock()
+        self._last_heartbeat = time.monotonic()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
+        self._stop_event.clear()
+        self._record_heartbeat()
         recovered = self.database.recover_interrupted_running_commands()
         if recovered:
             logger.warning("Requeued %s interrupted running command(s)", recovered)
@@ -207,12 +213,40 @@ class GroupScheduler:
         if self._thread is not None:
             self._thread.join(timeout=5)
 
+        for command in self.database.list_commands(CommandStatus.RUNNING):
+            pid = command["pid"]
+            if pid is None:
+                try:
+                    self.database.requeue_unlaunched_killed(command["id"])
+                except (KeyError, ValueError):
+                    logger.exception("Failed to stop unlaunched command %s", command["id"])
+                continue
+            try:
+                terminate_process_group(pid)
+            except (PermissionError, ProcessLookupError):
+                logger.warning("Process group for command %s is already unavailable", command["id"])
+
+        deadline = time.monotonic() + 10
+        with self._running_lock:
+            running_threads = list(self._running_threads)
+        for thread in running_threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    def health(self) -> dict[str, bool | float]:
+        with self._heartbeat_lock:
+            heartbeat_age = max(time.monotonic() - self._last_heartbeat, 0.0)
+        return {
+            "scheduler_alive": self._thread is not None and self._thread.is_alive(),
+            "scheduler_heartbeat_age_seconds": heartbeat_age,
+        }
+
     def wake(self) -> None:
         with self._condition:
             self._condition.notify_all()
 
     def run_forever(self) -> None:
         while not self._stop_event.is_set():
+            self._record_heartbeat()
             dispatched = False
             skipped_group_ids: set[int] = set()
             while not self._stop_event.is_set():
@@ -225,6 +259,9 @@ class GroupScheduler:
                 if prepared is None:
                     skipped_group_ids.add(command["group_id"])
                     continue
+                if self._stop_event.is_set():
+                    self.runner.release_prepared_reservation(prepared)
+                    break
                 claimed = self.database.mark_command_running(
                     command["id"],
                     _format_assigned_gpu_ids(prepared.reservation),
@@ -239,6 +276,10 @@ class GroupScheduler:
             if not dispatched:
                 with self._condition:
                     self._condition.wait(timeout=self.poll_interval_seconds)
+
+    def _record_heartbeat(self) -> None:
+        with self._heartbeat_lock:
+            self._last_heartbeat = time.monotonic()
 
     def _start_command_thread(self, prepared: PreparedCommand) -> None:
         thread = threading.Thread(

@@ -221,7 +221,17 @@ def _vllm_target_key(target: str) -> str:
 
 
 def build_ssh_command(host: HostConfig, remote_command: list[str]) -> list[str]:
-    cmd = ["ssh"]
+    cmd = [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=1",
+    ]
     if host.port is not None:
         cmd.extend(["-p", str(host.port)])
     if host.identity_file is not None:

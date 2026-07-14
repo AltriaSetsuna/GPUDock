@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from cmddock.api import build_app
+from cmddock.api import LOG_PREVIEW_BYTES, _read_text_file, build_app
 from cmddock.config import build_settings
 
 
@@ -58,3 +58,14 @@ def test_gpu_status_endpoints_are_registered(tmp_path):
 
     assert "/gpu/resources" in paths
     assert "/gpu/status" in paths
+
+
+def test_log_reader_returns_only_bounded_tail(tmp_path):
+    log_path = tmp_path / "large.log"
+    log_path.write_bytes(b"prefix" + b"x" * LOG_PREVIEW_BYTES)
+
+    content = _read_text_file(str(log_path))
+
+    assert content.startswith("[log truncated;")
+    assert content.endswith("x" * 100)
+    assert "prefix" not in content

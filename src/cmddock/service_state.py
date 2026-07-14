@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import socket
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 DEFAULT_PORT = 8765
 STATE_FILE_NAME = "service.json"
+LOCK_FILE_NAME = "service.lock"
 
 
 @dataclass(frozen=True)
@@ -24,6 +27,23 @@ class ServiceState:
 
 def service_state_path(data_dir: Path) -> Path:
     return data_dir / STATE_FILE_NAME
+
+
+def service_lock_path(data_dir: Path) -> Path:
+    return data_dir / LOCK_FILE_NAME
+
+
+class ServiceLock:
+    def __init__(self, handle) -> None:
+        self._handle = handle
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        with suppress(OSError):
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        self._handle.close()
+        self._handle = None
 
 
 def read_service_state(data_dir: Path) -> ServiceState | None:
@@ -44,7 +64,10 @@ def read_service_state(data_dir: Path) -> ServiceState | None:
 
 def write_service_state(data_dir: Path, state: ServiceState) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
-    service_state_path(data_dir).write_text(json.dumps(asdict(state), indent=2) + "\n")
+    path = service_state_path(data_dir)
+    temporary_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary_path.write_text(json.dumps(asdict(state), indent=2) + "\n")
+    os.replace(temporary_path, path)
 
 
 def clear_service_state(data_dir: Path) -> None:
@@ -61,6 +84,34 @@ def process_exists(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def acquire_service_lock(data_dir: Path) -> ServiceLock | None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    handle = service_lock_path(data_dir).open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return ServiceLock(handle)
+
+
+def service_lock_is_held(data_dir: Path) -> bool:
+    path = service_lock_path(data_dir)
+    try:
+        handle = path.open("a+")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        handle.close()
 
 
 def is_port_available(host: str, port: int) -> bool:
@@ -85,7 +136,11 @@ def running_service(data_dir: Path) -> ServiceState | None:
     state = read_service_state(data_dir)
     if state is None:
         return None
-    if process_exists(state.pid):
+    if service_lock_path(data_dir).exists():
+        if service_lock_is_held(data_dir):
+            return state
+    elif process_exists(state.pid):
+        # Compatibility with services started before the lock file was introduced.
         return state
     clear_service_state(data_dir)
     return None

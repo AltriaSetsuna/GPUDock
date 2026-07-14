@@ -43,7 +43,8 @@ def test_group_detail_warns_when_group_is_not_schedulable() -> None:
     )
     assert 'group.execution_state === "draft"' in html
     assert 'group.execution_state === "paused"' in html
-    assert 'group.execution_state === "draft" || group.status === "completed"' in html
+    assert 'group.execution_state === "running"' in html
+    assert 'group.status === "completed"' in html
 
 
 def test_dashboard_does_not_show_group_or_task_ids() -> None:
@@ -87,3 +88,12 @@ def test_dashboard_avoids_nullish_coalescing_for_older_browsers() -> None:
     assert "??" not in html
     assert "?." not in html
     assert "task.min_idle_seconds == null ? 120 : task.min_idle_seconds" in html
+
+
+def test_dashboard_escapes_database_values_before_using_inner_html() -> None:
+    html = render_index()
+
+    assert "escapeHtml(group.name)" in html
+    assert 'escapeHtml(group.current_command || "")' in html
+    assert "escapeHtml(task.command)" in html
+    assert "escapeHtml(taskGpu(task))" in html

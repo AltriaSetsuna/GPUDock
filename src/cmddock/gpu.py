@@ -24,6 +24,7 @@ VLLM_REMOTE_HINTS = ("VLLM_TARGET", "VLLM_HOST_CONFIG", "vllm_configure_target")
 IDLE_MEMORY_THRESHOLD = 0.01
 IDLE_STABILITY_SECONDS = float(DEFAULT_MIN_IDLE_SECONDS)
 MAX_IDLE_SECONDS = float(MAX_MIN_IDLE_SECONDS)
+GPU_QUERY_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -323,6 +324,7 @@ def _strip_shell_quotes(value: str) -> str:
 def get_gpu_memory_status(
     resource_id: str = LOCAL_RESOURCE,
     host_config: HostConfig | None = None,
+    timeout_seconds: float = GPU_QUERY_TIMEOUT_SECONDS,
 ) -> list[GPUStatus]:
     cmd = [
         "nvidia-smi",
@@ -333,7 +335,27 @@ def get_gpu_memory_status(
         if host_config is None:
             raise ValueError(f"Remote GPU host '{resource_id}' is not configured.")
         cmd = build_ssh_command(host_config, cmd)
-    output = subprocess.check_output(cmd, text=True).strip()
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GPUSchedulingError(
+            f"GPU status query timed out after {timeout_seconds:g} second(s) on {resource_id}."
+        ) from exc
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = str(exc)
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            detail = exc.stderr.strip() or detail
+        raise GPUSchedulingError(
+            f"GPU status query failed on {resource_id}: {detail}"
+        ) from exc
+
+    output = completed.stdout.strip()
     statuses: list[GPUStatus] = []
     for line in output.splitlines():
         if not line.strip():

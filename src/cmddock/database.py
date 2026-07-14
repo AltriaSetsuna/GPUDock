@@ -398,11 +398,7 @@ class Database:
                 target_group = self.get_task_group(group_id, conn=conn)
                 if target_group["archived_at"] is not None:
                     raise ValueError("Cannot add commands to an archived task group.")
-            if target_group["execution_state"] != GroupExecutionState.DRAFT:
-                if target_group["status"] != GroupStatus.COMPLETED:
-                    raise ValueError(
-                        "Commands can only be added while the task group is draft or completed."
-                    )
+            if target_group["status"] == GroupStatus.COMPLETED:
                 conn.execute(
                     """
                     UPDATE task_groups
@@ -411,6 +407,14 @@ class Database:
                     WHERE id = ?
                     """,
                     (GroupExecutionState.DRAFT, group_id),
+                )
+            elif target_group["execution_state"] not in {
+                GroupExecutionState.DRAFT,
+                GroupExecutionState.RUNNING,
+            }:
+                raise ValueError(
+                    "Commands can only be added while the task group is draft, running, "
+                    "or completed."
                 )
             submitted_at = utc_now()
             position = self._next_command_position(conn, group_id)
